@@ -2900,20 +2900,20 @@ static void WriteModuleLevelReferences(const GlobalVariable &V,
                                        SmallVector<uint64_t, 64> &NameVals,
                                        unsigned FSModRefsAbbrev,
                                        BitstreamWriter &Stream) {
+  // Only interested in recording variable defs in the summary.
+  if (V.isDeclaration())
+    return;
   DenseSet<unsigned> RefEdges;
   SmallPtrSet<const User *, 8> Visited;
   findRefEdges(&V, VE, RefEdges, Visited);
-  unsigned RefCount = RefEdges.size();
-  if (RefCount) {
-    NameVals.push_back(VE.getValueID(&V));
-    NameVals.push_back(getEncodedLinkage(V.getLinkage()));
-    for (auto RefId : RefEdges) {
-      NameVals.push_back(RefId);
-    }
-    Stream.EmitRecord(bitc::FS_PERMODULE_GLOBALVAR_INIT_REFS, NameVals,
-                      FSModRefsAbbrev);
-    NameVals.clear();
+  NameVals.push_back(VE.getValueID(&V));
+  NameVals.push_back(getEncodedLinkage(V.getLinkage()));
+  for (auto RefId : RefEdges) {
+    NameVals.push_back(RefId);
   }
+  Stream.EmitRecord(bitc::FS_PERMODULE_GLOBALVAR_INIT_REFS, NameVals,
+                    FSModRefsAbbrev);
+  NameVals.clear();
 }
 
 /// Emit the per-module summary section alongside the rest of
@@ -2973,7 +2973,7 @@ static void WritePerModuleGlobalValueSummary(
     assert(FunctionIndex.count(&F) == 1);
 
     WritePerModuleFunctionSummaryRecord(
-        NameVals, dyn_cast<FunctionSummary>(FunctionIndex[&F]->summary()),
+        NameVals, cast<FunctionSummary>(FunctionIndex[&F]->summary()),
         VE.getValueID(M->getValueSymbolTable().lookup(F.getName())),
         FSCallsAbbrev, FSCallsProfileAbbrev, Stream, F);
   }
@@ -2987,7 +2987,7 @@ static void WritePerModuleGlobalValueSummary(
 
     assert(FunctionIndex.count(F) == 1);
     FunctionSummary *FS =
-        dyn_cast<FunctionSummary>(FunctionIndex[F]->summary());
+        cast<FunctionSummary>(FunctionIndex[F]->summary());
     // Add the alias to the reference list of aliasee function.
     FS->addRefEdge(
         VE.getValueID(M->getValueSymbolTable().lookup(A.getName())));
@@ -3001,11 +3001,9 @@ static void WritePerModuleGlobalValueSummary(
   // of a function scope.
   for (const GlobalVariable &G : M->globals())
     WriteModuleLevelReferences(G, VE, NameVals, FSModRefsAbbrev, Stream);
-  for (const GlobalAlias &A : M->aliases()) {
-    const auto *GV = dyn_cast<GlobalVariable>(A.getBaseObject());
-    if (GV)
+  for (const GlobalAlias &A : M->aliases())
+    if (auto *GV = dyn_cast<GlobalVariable>(A.getBaseObject()))
       WriteModuleLevelReferences(*GV, VE, NameVals, FSModRefsAbbrev, Stream);
-  }
 
   Stream.ExitBlock();
 }
@@ -3056,7 +3054,6 @@ static void WriteCombinedGlobalValueSummary(
       assert(S);
 
       if (auto *VS = dyn_cast<GlobalVarSummary>(S)) {
-        assert(!VS->refs().empty() && "Expected at least one ref edge");
         NameVals.push_back(I.getModuleId(VS->modulePath()));
         NameVals.push_back(getEncodedLinkage(VS->linkage()));
         for (auto &RI : VS->refs()) {
@@ -3085,8 +3082,7 @@ static void WriteCombinedGlobalValueSummary(
         continue;
       }
 
-      auto *FS = dyn_cast<FunctionSummary>(S);
-      assert(FS);
+      auto *FS = cast<FunctionSummary>(S);
       NameVals.push_back(I.getModuleId(FS->modulePath()));
       NameVals.push_back(getEncodedLinkage(FS->linkage()));
       NameVals.push_back(FS->instCount());
