@@ -23,7 +23,12 @@ static cl::opt<TargetLibraryInfoImpl::VectorLibrary> ClVectorLibrary(
                           "No vector functions library"),
                clEnumValN(TargetLibraryInfoImpl::Accelerate, "Accelerate",
                           "Accelerate framework"),
+               clEnumValN(TargetLibraryInfoImpl::SLEEF, "SLEEF",
+                          "SLEEF (for the BG/Q)"),
                clEnumValEnd));
+
+static cl::opt<bool> ClVectorLibraryFM("vector-library-fast-math", cl::Hidden,
+    cl::desc("Use fast-math vector functions library"), cl::init(false));
 
 const char *const TargetLibraryInfoImpl::StandardNames[LibFunc::NumLibFuncs] = {
 #define TLI_DEFINE_STRING
@@ -399,7 +404,7 @@ static void initialize(TargetLibraryInfoImpl &TLI, const Triple &T,
   if (T.isNVPTX())
     TLI.disableAllFunctions();
 
-  TLI.addVectorizableFunctionsFromVecLib(ClVectorLibrary);
+  TLI.addVectorizableFunctionsFromVecLib(ClVectorLibrary, ClVectorLibraryFM);
 }
 
 TargetLibraryInfoImpl::TargetLibraryInfoImpl() {
@@ -506,7 +511,7 @@ void TargetLibraryInfoImpl::addVectorizableFunctions(ArrayRef<VecDesc> Fns) {
 }
 
 void TargetLibraryInfoImpl::addVectorizableFunctionsFromVecLib(
-    enum VectorLibrary VecLib) {
+    enum VectorLibrary VecLib, bool FastMath) {
   switch (VecLib) {
   case Accelerate: {
     const VecDesc VecFuncs[] = {
@@ -548,6 +553,190 @@ void TargetLibraryInfoImpl::addVectorizableFunctionsFromVecLib(
         {"atanhf", "vatanhf", 4},
     };
     addVectorizableFunctions(VecFuncs);
+    break;
+  }
+  case SLEEF: { // For the BG/Q
+    const VecDesc VecFuncs[] = {
+        // Double precision
+        {"sin", "__xsin_u1", 4},
+        {"llvm.sin.f64", "__xsin_u1", 4},
+        {"cos", "__xcos_u1", 4},
+        {"llvm.cos.f64", "__xcos_u1", 4},
+        {"pow", "__xpow", 4},
+        {"llvm.pow.f64", "__xpow", 4},
+        {"__pow_finite", "__xpow", 4},
+        {"log", "__xlog_u1", 4},
+        {"llvm.log.f64", "__xlog_u1", 4},
+        {"__log_finite", "__xlog", 4},
+        {"log10", "__xlog10", 4},
+        {"llvm.log10.f64", "__xlog10", 4},
+        {"__log10_finite", "__xlog10", 4},
+        {"exp", "__xexp", 4},
+        {"llvm.exp.f64", "__xexp", 4},
+        {"__exp_finite", "__xexp", 4},
+        {"exp2", "__xexp2", 4},
+        {"llvm.exp2.f64", "__xexp2", 4},
+        {"__exp2_finite", "__xexp2", 4},
+        {"tan", "__xtan_u1", 4},
+        {"asin", "__xasin_u1", 4},
+        {"__asin_finite", "__xasin", 4},
+        {"acos", "__xacos_u1", 4},
+        {"__acos_finite", "__xacos", 4},
+        {"atan", "__xatan_u1", 4},
+        {"atan2", "__xatan2_u1", 4},
+        {"__atan2_finite", "__xatan2", 4},
+        {"cbrt", "__xcbrt", 4},
+        {"sinh", "__xsinh", 4},
+        {"__sinh_finite", "__xsinh", 4},
+        {"cosh", "__xcosh", 4},
+        {"__cosh_finite", "__xcosh", 4},
+        {"tanh", "__xtanh", 4},
+        {"asinh", "__xasinh", 4},
+        {"acosh", "__xacosh", 4},
+        {"__acosh_finite", "__xacosh", 4},
+        {"atanh", "__xatanh", 4},
+        {"__atanh_finite", "__xatanh", 4},
+        {"exp10", "__xexp10", 4},
+        {"__exp10_finite", "__xexp10", 4},
+        {"expm1", "__xexpm1", 4},
+        {"log1p", "__xlog1p", 4},
+
+        // Single precision
+        {"sinf", "__xsinf", 4},
+        {"llvm.sin.f32", "__xsinf", 4},
+        {"cosf", "__xcosf", 4},
+        {"llvm.cos.f32", "__xcosf", 4},
+        {"powf", "__xpowf", 4},
+        {"llvm.pow.f32", "__xpowf", 4},
+        {"__powf_finite", "__xpowf", 4},
+        {"logf", "__xlogf", 4},
+        {"llvm.log.f32", "__xlogf", 4},
+        {"__logf_finite", "__xlogf", 4},
+        {"log10f", "__xlog10f", 4},
+        {"llvm.log10.f32", "__xlog10f", 4},
+        {"__log10f_finite", "__xlog10f", 4},
+        {"expf", "__xexpf", 4},
+        {"llvm.exp.f32", "__xexpf", 4},
+        {"__expf_finite", "__xexpf", 4},
+        {"exp2f", "__xexp2f", 4},
+        {"llvm.exp2.f32", "__xexp2f", 4},
+        {"__exp2f_finite", "__xexp2f", 4},
+        {"tanf", "__xtanf", 4},
+        {"asinf", "__xasinf", 4},
+        {"__asinf_finite", "__xasinf", 4},
+        {"acosf", "__xacosf", 4},
+        {"__acosf_finite", "__xacosf", 4},
+        {"atanf", "__xatanf", 4},
+        {"atan2f", "__xatan2f", 4},
+        {"__atan2f_finite", "__xatan2f", 4},
+        {"cbrtf", "__xcbrtf", 4},
+        {"sinhf", "__xsinhf", 4},
+        {"__sinhf_finite", "__xsinhf", 4},
+        {"coshf", "__xcoshf", 4},
+        {"__coshf_finite", "__xcoshf", 4},
+        {"tanhf", "__xtanhf", 4},
+        {"asinhf", "__xasinhf", 4},
+        {"acoshf", "__xacoshf", 4},
+        {"__acoshf_finite", "__xacoshf", 4},
+        {"atanhf", "__xatanhf", 4},
+        {"__atanhf_finite", "__xatanhf", 4},
+        {"exp10f", "__xexp10f", 4},
+        {"__exp10f_finite", "__xexp10f", 4},
+        {"expm1f", "__xexpm1f", 4},
+        {"log1pf", "__xlog1pf", 4}
+    };
+
+    const VecDesc VecFuncsFM[] = {
+        // Double precision
+        {"sin", "__xsin", 4},
+        {"llvm.sin.f64", "__xsin", 4},
+        {"cos", "__xcos", 4},
+        {"llvm.cos.f64", "__xcos", 4},
+        {"pow", "__xpow", 4},
+        {"llvm.pow.f64", "__xpow", 4},
+        {"__pow_finite", "__xpow", 4},
+        {"log", "__xlog", 4},
+        {"llvm.log.f64", "__xlog", 4},
+        {"__log_finite", "__xlog", 4},
+        {"log10", "__xlog10", 4},
+        {"llvm.log10.f64", "__xlog10", 4},
+        {"__log10_finite", "__xlog10", 4},
+        {"exp", "__xexp", 4},
+        {"llvm.exp.f64", "__xexp", 4},
+        {"__exp_finite", "__xexp", 4},
+        {"exp2", "__xexp2", 4},
+        {"llvm.exp2.f64", "__xexp2", 4},
+        {"__exp2_finite", "__xexp2", 4},
+        {"tan", "__xtan", 4},
+        {"asin", "__xasin", 4},
+        {"__asin_finite", "__xasin", 4},
+        {"acos", "__xacos", 4},
+        {"__acos_finite", "__xacos", 4},
+        {"atan", "__xatan", 4},
+        {"atan2", "__xatan2", 4},
+        {"__atan2_finite", "__xatan2", 4},
+        {"cbrt", "__xcbrt", 4},
+        {"sinh", "__xsinh", 4},
+        {"__sinh_finite", "__xsinh", 4},
+        {"cosh", "__xcosh", 4},
+        {"__cosh_finite", "__xcosh", 4},
+        {"tanh", "__xtanh", 4},
+        {"asinh", "__xasinh", 4},
+        {"acosh", "__xacosh", 4},
+        {"__acosh_finite", "__xacosh", 4},
+        {"atanh", "__xatanh", 4},
+        {"__atanh_finite", "__xatanh", 4},
+        {"exp10", "__xexp10", 4},
+        {"__exp10_finite", "__xexp10", 4},
+        {"expm1", "__xexpm1", 4},
+        {"log1p", "__xlog1p", 4},
+
+        // Single precision
+        {"sinf", "__xsinf", 4},
+        {"llvm.sin.f32", "__xsinf", 4},
+        {"cosf", "__xcosf", 4},
+        {"llvm.cos.f32", "__xcosf", 4},
+        {"powf", "__xpowf", 4},
+        {"llvm.pow.f32", "__xpowf", 4},
+        {"__powf_finite", "__xpowf", 4},
+        {"logf", "__xlogf", 4},
+        {"llvm.log.f32", "__xlogf", 4},
+        {"__logf_finite", "__xlogf", 4},
+        {"log10f", "__xlog10f", 4},
+        {"llvm.log10.f32", "__xlog10f", 4},
+        {"__log10f_finite", "__xlog10f", 4},
+        {"expf", "__xexpf", 4},
+        {"llvm.exp.f32", "__xexpf", 4},
+        {"__expf_finite", "__xexpf", 4},
+        {"exp2f", "__xexp2f", 4},
+        {"llvm.exp2.f32", "__xexp2f", 4},
+        {"__exp2f_finite", "__xexp2f", 4},
+        {"tanf", "__xtanf", 4},
+        {"asinf", "__xasinf", 4},
+        {"__asinf_finite", "__xasinf", 4},
+        {"acosf", "__xacosf", 4},
+        {"__acosf_finite", "__xacosf", 4},
+        {"atanf", "__xatanf", 4},
+        {"atan2f", "__xatan2f", 4},
+        {"__atan2f_finite", "__xatan2f", 4},
+        {"cbrtf", "__xcbrtf", 4},
+        {"sinhf", "__xsinhf", 4},
+        {"__sinhf_finite", "__xsinhf", 4},
+        {"coshf", "__xcoshf", 4},
+        {"__coshf_finite", "__xcoshf", 4},
+        {"tanhf", "__xtanhf", 4},
+        {"asinhf", "__xasinhf", 4},
+        {"acoshf", "__xacoshf", 4},
+        {"__acoshf_finite", "__xacoshf", 4},
+        {"atanhf", "__xatanhf", 4},
+        {"__atanhf_finite", "__xatanhf", 4},
+        {"exp10f", "__xexp10f", 4},
+        {"__exp10f_finite", "__xexp10f", 4},
+        {"expm1f", "__xexpm1f", 4},
+        {"log1pf", "__xlog1pf", 4}
+    };
+
+    addVectorizableFunctions(FastMath ? VecFuncsFM : VecFuncs);
     break;
   }
   case NoLibrary:

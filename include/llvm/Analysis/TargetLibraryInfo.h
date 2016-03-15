@@ -80,7 +80,8 @@ public:
   /// vectorizable functions.
   enum VectorLibrary {
     NoLibrary, // Don't use any vector library.
-    Accelerate // Use Accelerate framework.
+    Accelerate, // Use Accelerate framework.
+    SLEEF // SLEEF (BG/Q port)
   };
 
   TargetLibraryInfoImpl();
@@ -131,7 +132,8 @@ public:
 
   /// Calls addVectorizableFunctions with a known preset of functions for the
   /// given vector library.
-  void addVectorizableFunctionsFromVecLib(enum VectorLibrary VecLib);
+  void addVectorizableFunctionsFromVecLib(enum VectorLibrary VecLib,
+                                          bool FastMath = false);
 
   /// isFunctionVectorizable - Return true if the function F has a
   /// vector equivalent with vectorization factor VF.

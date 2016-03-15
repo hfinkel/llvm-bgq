@@ -305,6 +305,8 @@ bool PPCCTRLoops::mightUseCTR(const Triple &TT, BasicBlock *BB) {
           case Intrinsic::rint:      Opcode = ISD::FRINT;      break;
           case Intrinsic::nearbyint: Opcode = ISD::FNEARBYINT; break;
           case Intrinsic::round:     Opcode = ISD::FROUND;     break;
+          case Intrinsic::minnum:    Opcode = ISD::FMINNUM;    break;
+          case Intrinsic::maxnum:    Opcode = ISD::FMAXNUM;    break;
           }
         }
 
@@ -364,6 +366,14 @@ bool PPCCTRLoops::mightUseCTR(const Triple &TT, BasicBlock *BB) {
           case LibFunc::truncf:
           case LibFunc::truncl:
             Opcode = ISD::FTRUNC; break;
+          case LibFunc::fmin:
+          case LibFunc::fminf:
+          case LibFunc::fminl:
+            Opcode = ISD::FMINNUM; break;
+          case LibFunc::fmax:
+          case LibFunc::fmaxf:
+          case LibFunc::fmaxl:
+            Opcode = ISD::FMAXNUM; break;
           }
 
           auto &DL = CI->getModule()->getDataLayout();
