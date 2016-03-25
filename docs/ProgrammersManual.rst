@@ -342,9 +342,12 @@ that inherits from the ErrorInfo utility:
   public:
     MyError(std::string Msg) : Msg(Msg) {}
     void log(OStream &OS) const override { OS << "MyError - " << Msg; }
+    static char ID;
   private:
     std::string Msg;
   };
+
+  char MyError::ID = 0; // In MyError.cpp
 
   Error bar() {
     if (checkErrorCondition)
@@ -359,13 +362,15 @@ that inherits from the ErrorInfo utility:
 Error values can be implicitly converted to bool: true for error, false for
 success, enabling the following idiom:
 
-.. code-block::
+.. code-block:: c++
 
-  if (auto Err = mayFail())
-    return Err;
+  Error mayFail();
 
-  // Success! We can proceed.
-
+  Error foo() {
+    if (auto Err = mayFail())
+      return Err;
+    // Success! We can proceed.
+    ...
 
 For functions that can fail but need to return a value the ``Expected<T>``
 utility can be used. Values of this type can be constructed with either a

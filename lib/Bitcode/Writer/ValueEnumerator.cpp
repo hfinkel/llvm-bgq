@@ -280,7 +280,7 @@ static bool isIntOrIntVectorValue(const std::pair<const Value*, unsigned> &V) {
 
 ValueEnumerator::ValueEnumerator(const Module &M,
                                  bool ShouldPreserveUseListOrder)
-    : HasMDString(false), HasDILocation(false), HasGenericDINode(false),
+    : HasMDString(false),
       ShouldPreserveUseListOrder(ShouldPreserveUseListOrder) {
   if (ShouldPreserveUseListOrder)
     UseListOrders = predictUseListOrder(M);
@@ -472,8 +472,8 @@ void ValueEnumerator::OptimizeConstants(unsigned CstStart, unsigned CstEnd) {
   // Ensure that integer and vector of integer constants are at the start of the
   // constant pool.  This is important so that GEP structure indices come before
   // gep constant exprs.
-  std::partition(Values.begin()+CstStart, Values.begin()+CstEnd,
-                 isIntOrIntVectorValue);
+  std::stable_partition(Values.begin() + CstStart, Values.begin() + CstEnd,
+                        isIntOrIntVectorValue);
 
   // Rebuild the modified portion of ValueMap.
   for (; CstStart != CstEnd; ++CstStart)
@@ -532,8 +532,6 @@ void ValueEnumerator::EnumerateMetadata(const Metadata *MD) {
     EnumerateValue(C->getValue());
 
   HasMDString |= isa<MDString>(MD);
-  HasDILocation |= isa<DILocation>(MD);
-  HasGenericDINode |= isa<GenericDINode>(MD);
 
   // Replace the dummy ID inserted above with the correct one.  MetadataMap may
   // have changed by inserting operands, so we need a fresh lookup here.
