@@ -2827,7 +2827,7 @@ static void WriteModStrings(const ModuleSummaryIndex &I,
   unsigned Abbrev6Bit = Stream.EmitAbbrev(Abbv);
 
   SmallVector<unsigned, 64> NameVals;
-  for (const StringMapEntry<uint64_t> &MPSE : I.modPathStringEntries()) {
+  for (const StringMapEntry<uint64_t> &MPSE : I.modulePaths()) {
     StringEncoding Bits =
         getStringEncoding(MPSE.getKey().data(), MPSE.getKey().size());
     unsigned AbbrevToUse = Abbrev8Bit;
@@ -2863,7 +2863,7 @@ static void WritePerModuleFunctionSummaryRecord(
     NameVals.push_back(RI);
 
   bool HasProfileData = F.getEntryCount().hasValue();
-  for (auto &ECI : FS->edges()) {
+  for (auto &ECI : FS->calls()) {
     NameVals.push_back(ECI.first);
     assert(ECI.second.CallsiteCount > 0 && "Expected at least one callsite");
     NameVals.push_back(ECI.second.CallsiteCount);
@@ -3089,13 +3089,13 @@ static void WriteCombinedGlobalValueSummary(
       }
 
       bool HasProfileData = false;
-      for (auto &EI : FS->edges()) {
+      for (auto &EI : FS->calls()) {
         HasProfileData |= EI.second.ProfileCount != 0;
         if (HasProfileData)
           break;
       }
 
-      for (auto &EI : FS->edges()) {
+      for (auto &EI : FS->calls()) {
         const auto &VMI = GUIDToValueIdMap.find(EI.first);
         // If this GUID doesn't have an entry, it doesn't have a function
         // summary and we don't need to record any calls to it.
