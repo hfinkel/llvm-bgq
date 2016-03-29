@@ -44,6 +44,10 @@ using namespace ELF;
 #define ENUM_ENT_1(enum) \
   { #enum, #enum, ELF::enum }
 
+#define LLVM_READOBJ_PHDR_ENUM(ns, enum)                                       \
+  case ns::enum:                                                               \
+    return std::string(#enum).substr(3);
+
 #define TYPEDEF_ELF_TYPES(ELFT)                                                \
   typedef ELFFile<ELFT> ELFO;                                                  \
   typedef typename ELFO::Elf_Shdr Elf_Shdr;                                    \
@@ -331,6 +335,7 @@ private:
                    StringRef StrTable, bool IsDynamic) override;
   std::string getSymbolSectionNdx(const ELFO *Obj, const Elf_Sym *Symbol,
                                   const Elf_Sym *FirstSym);
+  void printDynamicRelocation(const ELFO *Obj, Elf_Rela R, bool IsRela);
   bool checkTLSSections(const Elf_Phdr &Phdr, const Elf_Shdr &Sec);
   bool checkoffsets(const Elf_Phdr &Phdr, const Elf_Shdr &Sec);
   bool checkVMA(const Elf_Phdr &Phdr, const Elf_Shdr &Sec);
@@ -1085,30 +1090,18 @@ static const char *getElfSegmentType(unsigned Arch, unsigned Type) {
 
 static std::string getElfPtType(unsigned Arch, unsigned Type) {
   switch (Type) {
-  case ELF::PT_NULL:
-    return "NULL";
-  case ELF::PT_LOAD:
-    return "LOAD";
-  case ELF::PT_DYNAMIC:
-    return "DYNAMIC";
-  case ELF::PT_INTERP:
-    return "INTERP";
-  case ELF::PT_NOTE:
-    return "NOTE";
-  case ELF::PT_SHLIB:
-    return "SHLIB";
-  case ELF::PT_PHDR:
-    return "PHDR";
-  case ELF::PT_TLS:
-    return "TLS";
-  case ELF::PT_GNU_EH_FRAME:
-    return "GNU_EH_FRAME";
-  case ELF::PT_SUNW_UNWIND:
-    return "SUNW_UNWIND";
-  case ELF::PT_GNU_STACK:
-    return "GNU_STACK";
-  case ELF::PT_GNU_RELRO:
-    return "GNU_RELRO";
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_NULL)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_LOAD)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_DYNAMIC)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_INTERP)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_NOTE)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_SHLIB)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_PHDR)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_TLS)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_GNU_EH_FRAME)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_SUNW_UNWIND)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_GNU_STACK)
+    LLVM_READOBJ_PHDR_ENUM(ELF, PT_GNU_RELRO)
   default:
     // All machine specific PT_* types
     switch (Arch) {
@@ -2331,16 +2324,8 @@ void GNUStyle<ELFT>::printRelocation(const ELFO *Obj, const Elf_Shdr *SymTab,
   StringRef StrTable = unwrapOrError(Obj->getStringTableForSymtab(*SymTab));
   StringRef TargetName;
   const Elf_Sym *Sym = nullptr;
-  unsigned Bias;
-  unsigned Width;
-
-  if (ELFT::Is64Bits) {
-    Bias = 8;
-    Width = 16;
-  } else {
-    Bias = 0;
-    Width = 8;
-  }
+  unsigned Width = (ELFT::Is64Bits) ? 16 : 8;
+  unsigned Bias = ELFT::Is64Bits ? 8 : 0;
 
   // First two fields are bit width dependent. The rest of them are after are
   // fixed width.
@@ -2379,8 +2364,19 @@ void GNUStyle<ELFT>::printRelocation(const ELFO *Obj, const Elf_Shdr *SymTab,
   Fields[4].Str = TargetName;
   for (auto &field : Fields)
     printField(field);
+  OS << Addend;
+  OS << "\n";
+}
+
+static inline void printRelocHeader(raw_ostream &OS, bool Is64, bool IsRela) {
+  if (Is64)
+    OS << "    Offset             Info             Type"
+       << "               Symbol's Value  Symbol's Name";
+  else
+    OS << " Offset     Info    Type                Sym. Value  "
+       << "Symbol's Name";
   if (IsRela)
-    OS << Addend;
+    OS << ((IsRela) ? " + Addend" : "");
   OS << "\n";
 }
 
@@ -2396,14 +2392,7 @@ template <class ELFT> void GNUStyle<ELFT>::printRelocations(const ELFO *Obj) {
     OS << "\nRelocation section '" << Name << "' at offset 0x"
        << to_hexString(Offset, false) << " contains " << Entries
        << " entries:\n";
-    if (ELFT::Is64Bits)
-      OS << "    Offset             Info             Type"
-         << "               Symbol's Value  Symbol's Name";
-    else
-      OS << " Offset     Info    Type                Sym. Value  "
-         << "Symbol's Name";
-    OS << ((Sec.sh_type == ELF::SHT_RELA) ? " + Addend" : "") << "\n";
-
+    printRelocHeader(OS,  ELFT::Is64Bits, (Sec.sh_type == ELF::SHT_RELA));
     const Elf_Shdr *SymTab = unwrapOrError(Obj->getSection(Sec.sh_link));
     if (Sec.sh_type == ELF::SHT_REL) {
       for (const auto &R : Obj->rels(&Sec)) {
@@ -2836,8 +2825,99 @@ void GNUStyle<ELFT>::printProgramHeaders(const ELFO *Obj) {
 }
 
 template <class ELFT>
+void GNUStyle<ELFT>::printDynamicRelocation(const ELFO *Obj, Elf_Rela R,
+                                            bool IsRela) {
+  SmallString<32> RelocName;
+  StringRef SymbolName;
+  unsigned Width = (ELFT::Is64Bits) ? 16 : 8;
+  unsigned Bias = ELFT::Is64Bits ? 8 : 0;
+  // First two fields are bit width dependent. The rest of them are after are
+  // fixed width.
+  Field Fields[5] = {0, 10 + Bias, 19 + 2 * Bias, 42 + 2 * Bias, 53 + 2 * Bias};
+
+  uint32_t SymIndex = R.getSymbol(Obj->isMips64EL());
+  const Elf_Sym *Sym = this->dumper()->dynamic_symbols().begin() + SymIndex;
+  Obj->getRelocationTypeName(R.getType(Obj->isMips64EL()), RelocName);
+  SymbolName =
+      unwrapOrError(Sym->getName(this->dumper()->getDynamicStringTable()));
+  std::string Addend = "", Info, Offset, Value;
+  Offset = to_string(format_hex_no_prefix(R.r_offset, Width));
+  Info = to_string(format_hex_no_prefix(R.r_info, Width));
+  Value = to_string(format_hex_no_prefix(Sym->getValue(), Width));
+  int64_t RelAddend = R.r_addend;
+  if (SymbolName.size() && IsRela) {
+    if (R.r_addend < 0)
+      Addend = " - ";
+    else
+      Addend = " + ";
+  }
+
+  if (!SymbolName.size() && Sym->getValue() == 0)
+    Value = "";
+
+  if (IsRela)
+    Addend += to_string(format_hex_no_prefix(std::abs(RelAddend), 1));
+
+
+  Fields[0].Str = Offset;
+  Fields[1].Str = Info;
+  Fields[2].Str = RelocName.c_str();
+  Fields[3].Str = Value;
+  Fields[4].Str = SymbolName;
+  for (auto &Field : Fields)
+    printField(Field);
+  OS << Addend;
+  OS << "\n";
+}
+
+template <class ELFT>
 void GNUStyle<ELFT>::printDynamicRelocations(const ELFO *Obj) {
-  OS << "GNU style dynamic relocations not implemented!\n";
+  const DynRegionInfo &DynRelRegion = this->dumper()->getDynRelRegion();
+  const DynRegionInfo &DynRelaRegion = this->dumper()->getDynRelaRegion();
+  const DynRegionInfo &DynPLTRelRegion = this->dumper()->getDynPLTRelRegion();
+  if (DynRelaRegion.Size > 0) {
+    OS << "\n'RELA' relocation section at offset "
+       << format_hex(reinterpret_cast<const uint8_t *>(DynRelaRegion.Addr) -
+                         Obj->base(),
+                     1) << " contains " << DynRelaRegion.Size << " bytes:\n";
+    printRelocHeader(OS, ELFT::Is64Bits, true);
+    for (const Elf_Rela &Rela : this->dumper()->dyn_relas())
+      printDynamicRelocation(Obj, Rela, true);
+  }
+  if (DynRelRegion.Size > 0) {
+    OS << "\n'REL' relocation section at offset "
+       << format_hex(reinterpret_cast<const uint8_t *>(DynRelRegion.Addr) -
+                         Obj->base(),
+                     1) << " contains " << DynRelRegion.Size << " bytes:\n";
+    printRelocHeader(OS, ELFT::Is64Bits, false);
+    for (const Elf_Rel &Rel : this->dumper()->dyn_rels()) {
+      Elf_Rela Rela;
+      Rela.r_offset = Rel.r_offset;
+      Rela.r_info = Rel.r_info;
+      Rela.r_addend = 0;
+      printDynamicRelocation(Obj, Rela, false);
+    }
+  }
+  if (DynPLTRelRegion.Size) {
+    OS << "\n'PLT' relocation section at offset "
+       << format_hex(reinterpret_cast<const uint8_t *>(DynPLTRelRegion.Addr) -
+                         Obj->base(),
+                     1) << " contains " << DynPLTRelRegion.Size << " bytes:\n";
+  }
+  if (DynPLTRelRegion.EntSize == sizeof(Elf_Rela)) {
+    printRelocHeader(OS, ELFT::Is64Bits, true);
+    for (const Elf_Rela &Rela : DynPLTRelRegion.getAsRange<Elf_Rela>())
+      printDynamicRelocation(Obj, Rela, true);
+  } else {
+    printRelocHeader(OS, ELFT::Is64Bits, false);
+    for (const Elf_Rel &Rel : DynPLTRelRegion.getAsRange<Elf_Rel>()) {
+      Elf_Rela Rela;
+      Rela.r_offset = Rel.r_offset;
+      Rela.r_info = Rel.r_info;
+      Rela.r_addend = 0;
+      printDynamicRelocation(Obj, Rela, false);
+    }
+  }
 }
 
 template <class ELFT> void LLVMStyle<ELFT>::printFileHeaders(const ELFO *Obj) {
