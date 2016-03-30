@@ -7281,6 +7281,7 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     Entry.isNest = false;
     Entry.isByVal = false;
     Entry.isReturned = false;
+    Entry.isSwiftSelf = false;
     Entry.Alignment = Align;
     CLI.getArgs().insert(CLI.getArgs().begin(), Entry);
     CLI.RetTy = Type::getVoidTy(CLI.RetTy->getContext());
@@ -7338,6 +7339,8 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
         Flags.setInReg();
       if (Args[i].isSRet)
         Flags.setSRet();
+      if (Args[i].isSwiftSelf)
+        Flags.setSwiftSelf();
       if (Args[i].isByVal)
         Flags.setByVal();
       if (Args[i].isInAlloca) {
@@ -7617,6 +7620,8 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
         Flags.setInReg();
       if (F.getAttributes().hasAttribute(Idx, Attribute::StructRet))
         Flags.setSRet();
+      if (F.getAttributes().hasAttribute(Idx, Attribute::SwiftSelf))
+        Flags.setSwiftSelf();
       if (F.getAttributes().hasAttribute(Idx, Attribute::ByVal))
         Flags.setByVal();
       if (F.getAttributes().hasAttribute(Idx, Attribute::InAlloca)) {
@@ -7956,7 +7961,12 @@ bool SelectionDAGBuilder::isDense(const CaseClusterVector &Clusters,
   return NumCases * 100 >= Range * Density;
 }
 
-static inline bool areJTsAllowed(const TargetLowering &TLI) {
+static inline bool areJTsAllowed(const TargetLowering &TLI,
+                                 const SwitchInst *SI) {
+  const Function *Fn = SI->getParent()->getParent();
+  if (Fn->getFnAttribute("no-jump-tables").getValueAsString() == "true")
+    return false;
+
   return TLI.isOperationLegalOrCustom(ISD::BR_JT, MVT::Other) ||
          TLI.isOperationLegalOrCustom(ISD::BRIND, MVT::Other);
 }
@@ -8050,7 +8060,7 @@ void SelectionDAGBuilder::findJumpTables(CaseClusterVector &Clusters,
 #endif
 
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
-  if (!areJTsAllowed(TLI))
+  if (!areJTsAllowed(TLI, SI))
     return;
 
   const int64_t N = Clusters.size();
