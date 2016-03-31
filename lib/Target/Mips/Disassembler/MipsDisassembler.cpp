@@ -44,6 +44,7 @@ public:
   bool hasMips32r6() const {
     return STI.getFeatureBits()[Mips::FeatureMips32r6];
   }
+  bool isFP64() const { return STI.getFeatureBits()[Mips::FeatureFP64Bit]; }
 
   bool isGP64() const { return STI.getFeatureBits()[Mips::FeatureGP64Bit]; }
 
@@ -371,11 +372,6 @@ static DecodeStatus DecodePOOL16BEncodedField(MCInst &Inst,
                                               unsigned Value,
                                               uint64_t Address,
                                               const void *Decoder);
-
-static DecodeStatus DecodeSimm16(MCInst &Inst,
-                                 unsigned Insn,
-                                 uint64_t Address,
-                                 const void *Decoder);
 
 template <unsigned Bits, int Offset, int Scale>
 static DecodeStatus DecodeUImmWithOffsetAndScale(MCInst &Inst, unsigned Value,
@@ -919,9 +915,9 @@ DecodeStatus MipsDisassembler::getInstruction(MCInst &Instr, uint64_t &Size,
       return Result;
     }
 
-    if (hasMips32r6()) {
-      DEBUG(dbgs() << "Trying MicroMips32r6FPU table (32-bit opcodes):\n");
-      Result = decodeInstruction(DecoderTableMicroMips32r6FPU32, Instr, Insn,
+    if (hasMips32r6() && isFP64()) {
+      DEBUG(dbgs() << "Trying MicroMips32r6FP64 table (32-bit opcodes):\n");
+      Result = decodeInstruction(DecoderTableMicroMips32r6FP6432, Instr, Insn,
                                  Address, this, STI);
       if (Result != MCDisassembler::Fail) {
         Size = 4;
@@ -1925,14 +1921,6 @@ static DecodeStatus DecodePOOL16BEncodedField(MCInst &Inst,
                                               uint64_t Address,
                                               const void *Decoder) {
   Inst.addOperand(MCOperand::createImm(Value == 0x0 ? 8 : Value));
-  return MCDisassembler::Success;
-}
-
-static DecodeStatus DecodeSimm16(MCInst &Inst,
-                                 unsigned Insn,
-                                 uint64_t Address,
-                                 const void *Decoder) {
-  Inst.addOperand(MCOperand::createImm(SignExtend32<16>(Insn)));
   return MCDisassembler::Success;
 }
 

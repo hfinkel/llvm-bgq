@@ -333,11 +333,13 @@ struct PGOIndirectCallSiteVisitor
   PGOIndirectCallSiteVisitor() {}
 
   void visitCallSite(CallSite CS) {
-    Instruction *I = CS.getInstruction();
-    CallInst *CI = dyn_cast<CallInst>(I);
-    if (CS.getCalledFunction() || !CS.getCalledValue() ||
-        (CI && CI->isInlineAsm()))
+    if (CS.getCalledFunction() || !CS.getCalledValue())
       return;
+    Instruction *I = CS.getInstruction();
+    if (CallInst *CI = dyn_cast<CallInst>(I)) {
+      if (CI->isInlineAsm())
+        return;
+    }
     IndirectCallInsts.push_back(I);
   }
 };
@@ -749,6 +751,15 @@ void PGOUseFunc::setBranchWeights() {
 void PGOUseFunc::annotateIndirectCallSites() {
   if (DisableValueProfiling)
     return;
+
+  // Write out the PGOFuncName if this is different from it's raw name.
+  // This should only apply to internal linkage functions only.
+  const std::string &FuncName = getPGOFuncName(F);
+  if (FuncName != F.getName()) {
+    LLVMContext &C = F.getContext();
+    MDNode *N = MDNode::get(C, MDString::get(C, FuncName.c_str()));
+    F.setMetadata("PGOFuncName", N);
+  }
 
   unsigned IndirectCallSiteIndex = 0;
   PGOIndirectCallSiteVisitor ICV;
