@@ -110,6 +110,9 @@ enum ModuleCodes {
 
   // HASH: [5*i32]
   MODULE_CODE_HASH = 17,
+
+  // IFUNC: [ifunc value type, addrspace, resolver val#, linkage, visibility]
+  MODULE_CODE_IFUNC = 18,
 };
 
 /// PARAMATTR blocks have code for defining a parameter attribute set.
@@ -510,7 +513,8 @@ enum AttributeKindCodes {
   ATTR_KIND_SWIFT_ERROR = 47,
   ATTR_KIND_NO_RECURSE = 48,
   ATTR_KIND_INACCESSIBLEMEM_ONLY = 49,
-  ATTR_KIND_INACCESSIBLEMEM_OR_ARGMEMONLY = 50
+  ATTR_KIND_INACCESSIBLEMEM_OR_ARGMEMONLY = 50,
+  ATTR_KIND_ALLOC_SIZE = 51
 };
 
 enum ComdatSelectionKindCodes {

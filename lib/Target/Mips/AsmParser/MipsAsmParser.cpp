@@ -3815,6 +3815,10 @@ bool MipsAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   case Match_UImm26_0:
     return Error(RefineErrorLoc(IDLoc, Operands, ErrorInfo),
                  "expected 26-bit unsigned immediate");
+  case Match_SImm32:
+  case Match_SImm32_Relaxed:
+    return Error(RefineErrorLoc(IDLoc, Operands, ErrorInfo),
+                 "expected 32-bit signed immediate");
   case Match_MemSImm9:
     return Error(RefineErrorLoc(IDLoc, Operands, ErrorInfo),
                  "expected memory with 9-bit signed offset");
@@ -5346,7 +5350,7 @@ bool MipsAsmParser::parseSetArchDirective() {
           .Case("mips64r3", "mips64r3")
           .Case("mips64r5", "mips64r5")
           .Case("mips64r6", "mips64r6")
-          .Case("cnmips", "cnmips")
+          .Case("octeon", "cnmips")
           .Case("r4000", "mips3") // This is an implementation of Mips3.
           .Default("");
 

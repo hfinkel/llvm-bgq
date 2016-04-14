@@ -466,15 +466,18 @@ void DwarfDebug::beginModule() {
 
   const Module *M = MMI->getModule();
 
-  NamedMDNode *CU_Nodes = M->getNamedMetadata("llvm.dbg.cu");
-  if (!CU_Nodes)
-    return;
-  TypeIdentifierMap = generateDITypeIdentifierMap(CU_Nodes);
+  TypeIdentifierMap = generateDITypeIdentifierMap(*M);
+  unsigned NumDebugCUs = 0;
+  for (DICompileUnit *CUNode : M->debug_compile_units()) {
+    (void)CUNode;
+    ++NumDebugCUs;
+  }
 
-  SingleCU = CU_Nodes->getNumOperands() == 1;
+  // Tell MMI whether we have debug info.
+  MMI->setDebugInfoAvailability(NumDebugCUs > 0);
+  SingleCU = NumDebugCUs == 1;
 
-  for (MDNode *N : CU_Nodes->operands()) {
-    auto *CUNode = cast<DICompileUnit>(N);
+  for (DICompileUnit *CUNode : M->debug_compile_units()) {
     DwarfCompileUnit &CU = constructDwarfCompileUnit(CUNode);
     for (auto *IE : CUNode->getImportedEntities())
       CU.addImportedEntity(IE);
@@ -500,9 +503,6 @@ void DwarfDebug::beginModule() {
     for (auto *IE : CUNode->getImportedEntities())
       constructAndAddImportedEntityDIE(CU, IE);
   }
-
-  // Tell MMI that we have debug info.
-  MMI->setDebugInfoAvailability(true);
 }
 
 void DwarfDebug::finishVariableDefinitions() {
@@ -526,29 +526,10 @@ void DwarfDebug::finishVariableDefinitions() {
 
 void DwarfDebug::finishSubprogramDefinitions() {
   for (const auto &P : SPMap)
-    forBothCUs(*P.second, [&](DwarfCompileUnit &CU) {
-      CU.finishSubprogramDefinition(cast<DISubprogram>(P.first));
-    });
-}
-
-// Collect info for variables that were optimized out.
-void DwarfDebug::collectDeadVariables() {
-  const Module *M = MMI->getModule();
-
-  if (NamedMDNode *CU_Nodes = M->getNamedMetadata("llvm.dbg.cu")) {
-    for (MDNode *N : CU_Nodes->operands()) {
-      auto *TheCU = cast<DICompileUnit>(N);
-      // Construct subprogram DIE and add variables DIEs.
-      DwarfCompileUnit *SPCU =
-          static_cast<DwarfCompileUnit *>(CUMap.lookup(TheCU));
-      assert(SPCU && "Unable to find Compile Unit!");
-      for (auto *SP : TheCU->getSubprograms()) {
-        if (ProcessedSPNodes.count(SP) != 0)
-          continue;
-        SPCU->collectDeadVariables(SP);
-      }
-    }
-  }
+    if (ProcessedSPNodes.count(P.first))
+      forBothCUs(*P.second, [&](DwarfCompileUnit &CU) {
+          CU.finishSubprogramDefinition(cast<DISubprogram>(P.first));
+        });
 }
 
 void DwarfDebug::finalizeModuleInfo() {
@@ -557,9 +538,6 @@ void DwarfDebug::finalizeModuleInfo() {
   finishSubprogramDefinitions();
 
   finishVariableDefinitions();
-
-  // Collect info for variables that were optimized out.
-  collectDeadVariables();
 
   // Handle anything that needs to be done on a per-unit basis after
   // all other generation.
@@ -1090,7 +1068,10 @@ void DwarfDebug::beginFunction(const MachineFunction *MF) {
   // includes the directory of the cpp file being built, even when the file name
   // is absolute (such as an <> lookup header)))
   DwarfCompileUnit *TheCU = SPMap.lookup(FnScope->getScopeNode());
-  assert(TheCU && "Unable to find compile unit!");
+  if (!TheCU)
+    // Once DISubprogram points to the owning CU, we can assert that the CU has
+    // a NoDebug EmissionKind here.
+    return;
   if (Asm->OutStreamer->hasRawTextSupport())
     // Use a single line table if we are generating assembly.
     Asm->OutStreamer->getContext().setDwarfCompileUnitID(0);
@@ -1113,13 +1094,20 @@ void DwarfDebug::endFunction(const MachineFunction *MF) {
       "endFunction should be called with the same function as beginFunction");
 
   if (!MMI->hasDebugInfo() || LScopes.empty() ||
-      !MF->getFunction()->getSubprogram()) {
+      !MF->getFunction()->getSubprogram() ||
+      // Once DISubprogram points to the owning CU, we can check for a
+      // CU with a NoDebug EmissionKind here.
+      !SPMap.lookup(MF->getFunction()->getSubprogram())) {
     // If we don't have a lexical scope for this function then there will
     // be a hole in the range information. Keep note of this by setting the
     // previously used section to nullptr.
     PrevCU = nullptr;
     CurFn = nullptr;
     DebugHandlerBase::endFunction(MF);
+    // Mark functions with no debug info on any instructions, but a
+    // valid DISubprogram as processed.
+    if (auto *SP = MF->getFunction()->getSubprogram())
+      ProcessedSPNodes.insert(SP);
     return;
   }
 
@@ -1438,10 +1426,10 @@ static void emitDebugLocValue(const AsmPrinter &AP, const DIBasicType *BT,
         DwarfExpr.AddMachineRegExpression(Expr, Loc.getReg(),
                                           PieceOffsetInBits);
     }
+  } else if (Value.isConstantFP()) {
+    APInt RawBytes = Value.getConstantFP()->getValueAPF().bitcastToAPInt();
+    DwarfExpr.AddUnsignedConstant(RawBytes);
   }
-  // else ... ignore constant fp. There is not any good way to
-  // to represent them here in dwarf.
-  // FIXME: ^
 }
 
 void DebugLocEntry::finalize(const AsmPrinter &AP,

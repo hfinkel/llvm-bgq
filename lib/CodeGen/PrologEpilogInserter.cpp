@@ -238,6 +238,8 @@ bool PEI::runOnMachineFunction(MachineFunction &Fn) {
   delete RS;
   SaveBlocks.clear();
   RestoreBlocks.clear();
+  MFI->setSavePoint(nullptr);
+  MFI->setRestorePoint(nullptr);
   return true;
 }
 
@@ -880,7 +882,7 @@ void PEI::replaceFrameIndices(MachineBasicBlock *BB, MachineFunction &Fn,
   unsigned FrameSetupOpcode = TII.getCallFrameSetupOpcode();
   unsigned FrameDestroyOpcode = TII.getCallFrameDestroyOpcode();
 
-  if (RS && !FrameIndexVirtualScavenging) RS->enterBasicBlock(BB);
+  if (RS && !FrameIndexVirtualScavenging) RS->enterBasicBlock(*BB);
 
   bool InsideCallSequence = false;
 
@@ -991,7 +993,7 @@ PEI::scavengeFrameVirtualRegs(MachineFunction &Fn) {
   // Run through the instructions and find any virtual registers.
   for (MachineFunction::iterator BB = Fn.begin(),
        E = Fn.end(); BB != E; ++BB) {
-    RS->enterBasicBlock(&*BB);
+    RS->enterBasicBlock(*BB);
 
     int SPAdj = 0;
 

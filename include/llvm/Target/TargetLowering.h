@@ -43,6 +43,7 @@
 namespace llvm {
   class CallInst;
   class CCState;
+  class CCValAssign;
   class FastISel;
   class FunctionLoweringInfo;
   class ImmutableCallSite;
@@ -52,6 +53,7 @@ namespace llvm {
   class MachineInstr;
   class MachineJumpTableInfo;
   class MachineLoop;
+  class MachineRegisterInfo;
   class Mangler;
   class MCContext;
   class MCExpr;
@@ -1011,13 +1013,18 @@ public:
     return PrefLoopAlignment;
   }
 
-  /// Return true if the target stores stack protector cookies at a fixed offset
-  /// in some non-standard address space, and populates the address space and
-  /// offset as appropriate.
-  virtual bool getStackCookieLocation(unsigned &/*AddressSpace*/,
-                                      unsigned &/*Offset*/) const {
-    return false;
-  }
+  /// If the target has a standard location for the stack protector guard,
+  /// returns the address of that location. Otherwise, returns nullptr.
+  virtual Value *getIRStackGuard(IRBuilder<> &IRB) const;
+
+  /// Inserts necessary declarations for SSP purpose. Should be used only when
+  /// getIRStackGuard returns nullptr.
+  virtual void insertSSPDeclarations(Module &M) const;
+
+  /// Return the variable that's previously inserted by insertSSPDeclarations,
+  /// if any, otherwise return nullptr. Should be used only when
+  /// getIRStackGuard returns nullptr.
+  virtual Value *getSDStackGuard(const Module &M) const;
 
   /// If the target has a standard location for the unsafe stack pointer,
   /// returns the address of that location. Otherwise, returns nullptr.
@@ -1053,6 +1060,14 @@ public:
   //===--------------------------------------------------------------------===//
   /// \name Helpers for atomic expansion.
   /// @{
+
+  /// Returns the maximum atomic operation size (in bits) supported by
+  /// the backend. Atomic operations greater than this size (as well
+  /// as ones that are not naturally aligned), will be expanded by
+  /// AtomicExpandPass into an __atomic_* library call.
+  unsigned getMaxAtomicSizeInBitsSupported() const {
+    return MaxAtomicSizeInBitsSupported;
+  }
 
   /// Whether AtomicExpandPass should automatically insert fences and reduce
   /// ordering for this atomic. This should be true for most architectures with
@@ -1110,7 +1125,7 @@ public:
   virtual Instruction *emitLeadingFence(IRBuilder<> &Builder,
                                         AtomicOrdering Ord, bool IsStore,
                                         bool IsLoad) const {
-    if (isAtLeastRelease(Ord) && IsStore)
+    if (isReleaseOrStronger(Ord) && IsStore)
       return Builder.CreateFence(Ord);
     else
       return nullptr;
@@ -1119,7 +1134,7 @@ public:
   virtual Instruction *emitTrailingFence(IRBuilder<> &Builder,
                                          AtomicOrdering Ord, bool IsStore,
                                          bool IsLoad) const {
-    if (isAtLeastAcquire(Ord))
+    if (isAcquireOrStronger(Ord))
       return Builder.CreateFence(Ord);
     else
       return nullptr;
@@ -1184,6 +1199,8 @@ public:
   virtual bool hasSignExtendedAtomicOps() const {
     return false;
   }
+
+  /// @}
 
   /// Returns true if we should normalize
   /// select(N0&N1, X, Y) => select(N0, select(N1, X, Y), Y) and
@@ -1447,6 +1464,14 @@ protected:
   /// Set the minimum stack alignment of an argument (in log2(bytes)).
   void setMinStackArgumentAlignment(unsigned Align) {
     MinStackArgumentAlignment = Align;
+  }
+
+  /// Set the maximum atomic operation size supported by the
+  /// backend. Atomic operations greater than this size (as well as
+  /// ones that are not naturally aligned), will be expanded by
+  /// AtomicExpandPass into an __atomic_* library call.
+  void setMaxAtomicSizeInBitsSupported(unsigned SizeInBits) {
+    MaxAtomicSizeInBitsSupported = SizeInBits;
   }
 
 public:
@@ -1858,6 +1883,9 @@ private:
   /// The preferred loop alignment.
   unsigned PrefLoopAlignment;
 
+  /// Size in bits of the maximum atomics size the backend supports.
+  /// Accesses larger than this will be expanded by AtomicExpandPass.
+  unsigned MaxAtomicSizeInBitsSupported;
 
   /// If set to a physical register, this specifies the register that
   /// llvm.savestack/llvm.restorestack should save and restore.
@@ -2113,6 +2141,14 @@ public:
                                           bool doesNotReturn = false,
                                           bool isReturnValueUsed = true) const;
 
+  /// Check whether parameters to a call that are passed in callee saved
+  /// registers are the same as from the calling function.  This needs to be
+  /// checked for tail call eligibility.
+  bool parametersInCSRMatch(const MachineRegisterInfo &MRI,
+      const uint32_t *CallerPreservedMask,
+      const SmallVectorImpl<CCValAssign> &ArgLocs,
+      const SmallVectorImpl<SDValue> &OutVals) const;
+
   //===--------------------------------------------------------------------===//
   // TargetLowering Optimization Methods
   //
@@ -2275,6 +2311,12 @@ public:
     return false;
   }
 
+  /// Return true if the target supports swifterror attribute. It optimizes
+  /// loads and stores to reading and writing a specific register.
+  virtual bool supportSwiftError() const {
+    return false;
+  }
+
   /// Return true if the target supports that a subset of CSRs for the given
   /// machine function is handled explicitly via copies.
   virtual bool supportSplitCSR(MachineFunction *MF) const {
@@ -2377,6 +2419,7 @@ public:
     SmallVector<ISD::OutputArg, 32> Outs;
     SmallVector<SDValue, 32> OutVals;
     SmallVector<ISD::InputArg, 32> Ins;
+    SmallVector<SDValue, 4> InVals;
 
     CallLoweringInfo(SelectionDAG &DAG)
         : RetTy(nullptr), RetSExt(false), RetZExt(false), IsVarArg(false),

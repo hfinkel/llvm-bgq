@@ -61,6 +61,8 @@ using namespace ELF;
   typedef typename ELFO::Elf_Half Elf_Half;                                    \
   typedef typename ELFO::Elf_Ehdr Elf_Ehdr;                                    \
   typedef typename ELFO::Elf_Word Elf_Word;                                    \
+  typedef typename ELFO::Elf_Hash Elf_Hash;                                    \
+  typedef typename ELFO::Elf_GnuHash Elf_GnuHash;                              \
   typedef typename ELFO::uintX_t uintX_t;
 
 namespace {
@@ -82,7 +84,7 @@ struct DynRegionInfo {
   /// \brief Size of each entity in the region.
   uint64_t EntSize;
 
-  template <typename Type> iterator_range<const Type *> getAsRange() const {
+  template <typename Type> ArrayRef<Type> getAsArrayRef() const {
     const Type *Start = reinterpret_cast<const Type *>(Addr);
     if (!Start)
       return {Start, Start};
@@ -120,6 +122,8 @@ public:
   void printMipsReginfo() override;
 
   void printStackMap() const override;
+
+  void printHashHistogram() override;
 
 private:
   std::unique_ptr<DumpStyle<ELFT>> ELFDumperStyle;
@@ -215,11 +219,11 @@ private:
 
 public:
   Elf_Dyn_Range dynamic_table() const {
-    return DynamicTable.getAsRange<Elf_Dyn>();
+    return DynamicTable.getAsArrayRef<Elf_Dyn>();
   }
 
   Elf_Sym_Range dynamic_symbols() const {
-    return DynSymRegion.getAsRange<Elf_Sym>();
+    return DynSymRegion.getAsArrayRef<Elf_Sym>();
   }
 
   Elf_Rel_Range dyn_rels() const;
@@ -234,6 +238,8 @@ public:
   const DynRegionInfo &getDynRelRegion() const { return DynRelRegion; }
   const DynRegionInfo &getDynRelaRegion() const { return DynRelaRegion; }
   const DynRegionInfo &getDynPLTRelRegion() const { return DynPLTRelRegion; }
+  const Elf_Hash *getHashTable() const { return HashTable; }
+  const Elf_GnuHash *getGnuHashTable() const { return GnuHashTable; }
 };
 
 template <class ELFT>
@@ -284,6 +290,7 @@ public:
                            const Elf_Sym *FirstSym, StringRef StrTable,
                            bool IsDynamic) = 0;
   virtual void printProgramHeaders(const ELFFile<ELFT> *Obj) = 0;
+  virtual void printHashHistogram(const ELFFile<ELFT> *Obj) = 0;
   const ELFDumper<ELFT> *dumper() const { return Dumper; }
 private:
   const ELFDumper<ELFT> *Dumper;
@@ -305,6 +312,7 @@ public:
   virtual void printSymtabMessage(const ELFO *Obj, StringRef Name,
                                   size_t Offset) override;
   void printProgramHeaders(const ELFO *Obj) override;
+  void printHashHistogram(const ELFFile<ELFT> *Obj) override;
 
 private:
   struct Field {
@@ -357,6 +365,7 @@ public:
   void printDynamicSymbols(const ELFO *Obj) override;
   void printDynamicRelocations(const ELFO *Obj) override;
   void printProgramHeaders(const ELFO *Obj) override;
+  void printHashHistogram(const ELFFile<ELFT> *Obj) override;
 
 private:
   void printRelocation(const ELFO *Obj, Elf_Rela Rel, const Elf_Shdr *SymTab);
@@ -1349,12 +1358,12 @@ void ELFDumper<ELFT>::parseDynamicTable(
 
 template <typename ELFT>
 typename ELFDumper<ELFT>::Elf_Rel_Range ELFDumper<ELFT>::dyn_rels() const {
-  return DynRelRegion.getAsRange<Elf_Rel>();
+  return DynRelRegion.getAsArrayRef<Elf_Rel>();
 }
 
 template <typename ELFT>
 typename ELFDumper<ELFT>::Elf_Rela_Range ELFDumper<ELFT>::dyn_relas() const {
-  return DynRelaRegion.getAsRange<Elf_Rela>();
+  return DynRelaRegion.getAsArrayRef<Elf_Rela>();
 }
 
 template<class ELFT>
@@ -1390,6 +1399,9 @@ void ELFDumper<ELFT>::printDynamicSymbols() {
   ELFDumperStyle->printDynamicSymbols(Obj);
 }
 
+template <class ELFT> void ELFDumper<ELFT>::printHashHistogram() {
+  ELFDumperStyle->printHashHistogram(Obj);
+}
 #define LLVM_READOBJ_TYPE_CASE(name) \
   case DT_##name: return #name
 
@@ -2906,16 +2918,121 @@ void GNUStyle<ELFT>::printDynamicRelocations(const ELFO *Obj) {
   }
   if (DynPLTRelRegion.EntSize == sizeof(Elf_Rela)) {
     printRelocHeader(OS, ELFT::Is64Bits, true);
-    for (const Elf_Rela &Rela : DynPLTRelRegion.getAsRange<Elf_Rela>())
+    for (const Elf_Rela &Rela : DynPLTRelRegion.getAsArrayRef<Elf_Rela>())
       printDynamicRelocation(Obj, Rela, true);
   } else {
     printRelocHeader(OS, ELFT::Is64Bits, false);
-    for (const Elf_Rel &Rel : DynPLTRelRegion.getAsRange<Elf_Rel>()) {
+    for (const Elf_Rel &Rel : DynPLTRelRegion.getAsArrayRef<Elf_Rel>()) {
       Elf_Rela Rela;
       Rela.r_offset = Rel.r_offset;
       Rela.r_info = Rel.r_info;
       Rela.r_addend = 0;
       printDynamicRelocation(Obj, Rela, false);
+    }
+  }
+}
+
+// Hash histogram shows  statistics of how efficient the hash was for the
+// dynamic symbol table. The table shows number of hash buckets for different
+// lengths of chains as absolute number and percentage of the total buckets.
+// Additionally cumulative coverage of symbols for each set of buckets.
+template <class ELFT>
+void GNUStyle<ELFT>::printHashHistogram(const ELFFile<ELFT> *Obj) {
+
+  const Elf_Hash *HashTable = this->dumper()->getHashTable();
+  const Elf_GnuHash *GnuHashTable = this->dumper()->getGnuHashTable();
+
+  // Print histogram for .hash section
+  if (HashTable) {
+    size_t NBucket = HashTable->nbucket;
+    size_t NChain = HashTable->nchain;
+    ArrayRef<Elf_Word> Buckets = HashTable->buckets();
+    ArrayRef<Elf_Word> Chains = HashTable->chains();
+    size_t TotalSyms = 0;
+    // If hash table is correct, we have at least chains with 0 length
+    size_t MaxChain = 1;
+    size_t CumulativeNonZero = 0;
+
+    if (NChain == 0 || NBucket == 0)
+      return;
+
+    std::vector<size_t> ChainLen(NBucket, 0);
+    // Go over all buckets and and note chain lengths of each bucket (total
+    // unique chain lengths).
+    for (size_t B = 0; B < NBucket; B++) {
+      for (size_t C = Buckets[B]; C > 0 && C < NChain; C = Chains[C])
+        if (MaxChain <= ++ChainLen[B])
+          MaxChain++;
+      TotalSyms += ChainLen[B];
+    }
+
+    if (!TotalSyms)
+      return;
+
+    std::vector<size_t> Count(MaxChain, 0) ;
+    // Count how long is the chain for each bucket
+    for (size_t B = 0; B < NBucket; B++)
+      ++Count[ChainLen[B]];
+    // Print Number of buckets with each chain lengths and their cumulative
+    // coverage of the symbols
+    OS << "Histogram for bucket list length (total of " << NBucket
+       << " buckets)\n"
+       << " Length  Number     % of total  Coverage\n";
+    for (size_t I = 0; I < MaxChain; I++) {
+      CumulativeNonZero += Count[I] * I;
+      OS << format("%7lu  %-10lu (%5.1f%%)     %5.1f%%\n", I, Count[I],
+                   (Count[I] * 100.0) / NBucket,
+                   (CumulativeNonZero * 100.0) / TotalSyms);
+    }
+  }
+
+  // Print histogram for .gnu.hash section
+  if (GnuHashTable) {
+    size_t NBucket = GnuHashTable->nbuckets;
+    ArrayRef<Elf_Word> Buckets = GnuHashTable->buckets();
+    unsigned NumSyms = this->dumper()->dynamic_symbols().size();
+    if (!NumSyms)
+      return;
+    ArrayRef<Elf_Word> Chains = GnuHashTable->values(NumSyms);
+    size_t Symndx = GnuHashTable->symndx;
+    size_t TotalSyms = 0;
+    size_t MaxChain = 1;
+    size_t CumulativeNonZero = 0;
+
+    if (Chains.size() == 0 || NBucket == 0)
+      return;
+
+    std::vector<size_t> ChainLen(NBucket, 0);
+
+    for (size_t B = 0; B < NBucket; B++) {
+      if (!Buckets[B])
+        continue;
+      size_t Len = 1;
+      for (size_t C = Buckets[B] - Symndx;
+           C < Chains.size() && (Chains[C] & 1) == 0; C++)
+        if (MaxChain < ++Len)
+          MaxChain++;
+      ChainLen[B] = Len;
+      TotalSyms += Len;
+    }
+    MaxChain++;
+
+    if (!TotalSyms)
+      return;
+
+    std::vector<size_t> Count(MaxChain, 0) ;
+    for (size_t B = 0; B < NBucket; B++)
+      ++Count[ChainLen[B]];
+    // Print Number of buckets with each chain lengths and their cumulative
+    // coverage of the symbols
+    OS << "Histogram for `.gnu.hash' bucket list length (total of " << NBucket
+       << " buckets)\n"
+       << " Length  Number     % of total  Coverage\n";
+    for (size_t I = 0; I <MaxChain; I++) {
+      CumulativeNonZero += Count[I] * I;
+      OS << format("%7lu  %-10lu (%5.1f%%)     %5.1f%%\n", I, Count[I],
+                   (Count[I] * 100.0) / NBucket,
+                   (CumulativeNonZero * 100.0) / TotalSyms);
     }
   }
 }
@@ -3226,10 +3343,10 @@ void LLVMStyle<ELFT>::printDynamicRelocations(const ELFO *Obj) {
       printDynamicRelocation(Obj, Rela);
     }
   if (DynPLTRelRegion.EntSize == sizeof(Elf_Rela))
-    for (const Elf_Rela &Rela : DynPLTRelRegion.getAsRange<Elf_Rela>())
+    for (const Elf_Rela &Rela : DynPLTRelRegion.getAsArrayRef<Elf_Rela>())
       printDynamicRelocation(Obj, Rela);
   else
-    for (const Elf_Rel &Rel : DynPLTRelRegion.getAsRange<Elf_Rel>()) {
+    for (const Elf_Rel &Rel : DynPLTRelRegion.getAsArrayRef<Elf_Rel>()) {
       Elf_Rela Rela;
       Rela.r_offset = Rel.r_offset;
       Rela.r_info = Rel.r_info;
@@ -3280,4 +3397,8 @@ void LLVMStyle<ELFT>::printProgramHeaders(const ELFO *Obj) {
     W.printFlags("Flags", Phdr.p_flags, makeArrayRef(ElfSegmentFlags));
     W.printNumber("Alignment", Phdr.p_align);
   }
+}
+template <class ELFT>
+void LLVMStyle<ELFT>::printHashHistogram(const ELFFile<ELFT> *Obj) {
+  W.startLine() << "Hash Histogram not implemented!\n";
 }

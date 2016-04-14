@@ -25,6 +25,7 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/DataTypes.h"
@@ -260,6 +261,10 @@ public:
     // (set to UINT_MAX to disable). This does not apply in cases where the
     // loop is being fully unrolled.
     unsigned MaxCount;
+    /// Set the maximum unrolling factor for full unrolling. Like MaxCount, but
+    /// applies even if full unrolling is selected. This allows a target to fall
+    /// back to Partial unrolling if full unrolling is above FullUnrollMaxCount.
+    unsigned FullUnrollMaxCount;
     /// Allow partial unrolling (unrolling of loops to expand the size of the
     /// loop body, not only to eliminate small constant-trip-count loops).
     bool Partial;
@@ -514,11 +519,11 @@ public:
 
   /// \returns The cost of Intrinsic instructions. Types analysis only.
   int getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
-                            ArrayRef<Type *> Tys) const;
+                            ArrayRef<Type *> Tys, FastMathFlags FMF) const;
 
   /// \returns The cost of Intrinsic instructions. Analyses the real arguments.
   int getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
-                            ArrayRef<Value *> Args) const;
+                            ArrayRef<Value *> Args, FastMathFlags FMF) const;
 
   /// \returns The cost of Call instructions.
   int getCallInstrCost(Function *F, Type *RetTy, ArrayRef<Type *> Tys) const;
@@ -660,9 +665,11 @@ public:
   virtual int getReductionCost(unsigned Opcode, Type *Ty,
                                bool IsPairwiseForm) = 0;
   virtual int getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
-                                    ArrayRef<Type *> Tys) = 0;
+                                    ArrayRef<Type *> Tys,
+                                    FastMathFlags FMF) = 0;
   virtual int getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
-                                    ArrayRef<Value *> Args) = 0;
+                                    ArrayRef<Value *> Args,
+                                    FastMathFlags FMF) = 0;
   virtual int getCallInstrCost(Function *F, Type *RetTy,
                                ArrayRef<Type *> Tys) = 0;
   virtual unsigned getNumberOfParts(Type *Tp) = 0;
@@ -857,13 +864,14 @@ public:
                        bool IsPairwiseForm) override {
     return Impl.getReductionCost(Opcode, Ty, IsPairwiseForm);
   }
-  int getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
-                            ArrayRef<Type *> Tys) override {
-    return Impl.getIntrinsicInstrCost(ID, RetTy, Tys);
+  int getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy, ArrayRef<Type *> Tys,
+                            FastMathFlags FMF) override {
+    return Impl.getIntrinsicInstrCost(ID, RetTy, Tys, FMF);
   }
   int getIntrinsicInstrCost(Intrinsic::ID ID, Type *RetTy,
-                            ArrayRef<Value *> Args) override {
-    return Impl.getIntrinsicInstrCost(ID, RetTy, Args);
+                            ArrayRef<Value *> Args,
+                            FastMathFlags FMF) override {
+    return Impl.getIntrinsicInstrCost(ID, RetTy, Args, FMF);
   }
   int getCallInstrCost(Function *F, Type *RetTy,
                        ArrayRef<Type *> Tys) override {

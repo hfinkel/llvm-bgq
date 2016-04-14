@@ -58,7 +58,10 @@ struct DelayedBasicBlock {
         TempBB(BasicBlock::Create(Old.getContext())) {}
 };
 
+class MDNodeMapper;
 class Mapper {
+  friend class MDNodeMapper;
+
   ValueToValueMapTy &VM;
   RemapFlags Flags;
   ValueMapTypeRemapper *TypeMapper;
@@ -66,7 +69,6 @@ class Mapper {
 
   SmallVector<DelayedGlobalValueInit, 8> DelayedInits;
   SmallVector<DelayedBasicBlock, 1> DelayedBBs;
-  SmallVector<MDNode *, 8> DistinctWorklist;
 
 public:
   Mapper(ValueToValueMapTy &VM, RemapFlags Flags,
@@ -77,6 +79,8 @@ public:
   ~Mapper();
 
   Value *mapValue(const Value *V);
+  void remapInstruction(Instruction *I);
+  void remapFunction(Function &F);
 
   /// Map metadata.
   ///
@@ -84,42 +88,176 @@ public:
   /// (not an MDNode, or MDNode::isResolved() returns true).
   Metadata *mapMetadata(const Metadata *MD);
 
+  // Map LocalAsMetadata, which never gets memoized.
+  //
+  // If the referenced local is not mapped, the principled return is nullptr.
+  // However, optimization passes sometimes move metadata operands *before* the
+  // SSA values they reference.  To prevent crashes in \a RemapInstruction(),
+  // return "!{}" when RF_IgnoreMissingLocals is not set.
+  //
+  // \note Adding a mapping for LocalAsMetadata is unsupported.  Add a mapping
+  // to the value map for the SSA value in question instead.
+  //
+  // FIXME: Once we have a verifier check for forward references to SSA values
+  // through metadata operands, always return nullptr on unmapped locals.
+  Metadata *mapLocalAsMetadata(const LocalAsMetadata &LAM);
+
 private:
   Value *mapBlockAddress(const BlockAddress &BA);
-
-  /// Map metadata helper.
-  ///
-  /// Co-recursively finds the mapping for MD.  If this returns an MDNode, it's
-  /// possible that MDNode::isResolved() will return false.
-  Metadata *mapMetadataImpl(const Metadata *MD);
-  Metadata *mapMetadataOp(Metadata *Op);
 
   /// Map metadata that doesn't require visiting operands.
   Optional<Metadata *> mapSimpleMetadata(const Metadata *MD);
 
-  /// Remap the operands of an MDNode.
-  ///
-  /// If \c Node is temporary, uniquing cycles are ignored.  If \c Node is
-  /// distinct, uniquing cycles are resolved as they're found.
-  ///
-  /// \pre \c Node.isDistinct() or \c Node.isTemporary().
-  bool remapOperands(MDNode &Node);
-
-  /// Map a distinct MDNode.
-  ///
-  /// Whether distinct nodes change is independent of their operands.  If \a
-  /// RF_MoveDistinctMDs, then they are reused, and their operands remapped in
-  /// place; effectively, they're moved from one graph to another.  Otherwise,
-  /// they're cloned/duplicated, and the new copy's operands are remapped.
-  Metadata *mapDistinctNode(const MDNode *Node);
-
-  /// Map a uniqued MDNode.
-  ///
-  /// Uniqued nodes may not need to be recreated (they may map to themselves).
-  Metadata *mapUniquedNode(const MDNode *Node);
-
   Metadata *mapToMetadata(const Metadata *Key, Metadata *Val);
   Metadata *mapToSelf(const Metadata *MD);
+};
+
+class MDNodeMapper {
+  Mapper &M;
+
+  struct Data {
+    bool HasChangedOps = false;
+    bool HasChangedAddress = false;
+    unsigned ID = ~0u;
+    TempMDNode Placeholder;
+
+    Data() {}
+    Data(Data &&X)
+        : HasChangedOps(std::move(X.HasChangedOps)),
+          HasChangedAddress(std::move(X.HasChangedAddress)),
+          ID(std::move(X.ID)), Placeholder(std::move(X.Placeholder)) {}
+    Data &operator=(Data &&X) {
+      HasChangedOps = std::move(X.HasChangedOps);
+      HasChangedAddress = std::move(X.HasChangedAddress);
+      ID = std::move(X.ID);
+      Placeholder = std::move(X.Placeholder);
+      return *this;
+    }
+  };
+
+  SmallDenseMap<const Metadata *, Data, 32> Info;
+  SmallVector<std::pair<MDNode *, bool>, 16> Worklist;
+  SmallVector<MDNode *, 16> POT;
+
+public:
+  MDNodeMapper(Mapper &M) : M(M) {}
+
+  /// Map a metadata node (and its transitive operands).
+  ///
+  /// This is the only entry point into MDNodeMapper.  It works as follows:
+  ///
+  ///  1. \a createPOT(): use a worklist to perform a post-order traversal of
+  ///     the transitively referenced unmapped nodes.
+  ///
+  ///  2. \a propagateChangedOperands(): track which nodes will change
+  ///     operands, and which will have new addresses in the mapped scheme.
+  ///     Propagate the changes through the POT until fixed point, to pick up
+  ///     uniquing cycles that need to change.
+  ///
+  ///  3. \a mapDistinctNodes(): map all the distinct nodes without touching
+  ///     their operands.  If RF_MoveDistinctMetadata, they get mapped to
+  ///     themselves; otherwise, they get mapped to clones.
+  ///
+  ///  4. \a mapUniquedNodes(): map the uniqued nodes (bottom-up), lazily
+  ///     creating temporaries for forward references as needed.
+  ///
+  ///  5. \a remapDistinctOperands(): remap the operands of the distinct nodes.
+  Metadata *map(const MDNode &FirstN);
+
+private:
+  /// Return \c true as long as there's work to do.
+  bool hasWork() const { return !Worklist.empty(); }
+
+  /// Get the current node in the worklist.
+  MDNode &getCurrentNode() const { return *Worklist.back().first; }
+
+  /// Push a node onto the worklist.
+  ///
+  /// Adds \c N to \a Worklist and \a Info, unless it's already inserted.  If
+  /// \c N.isDistinct(), \a Data::HasChangedAddress will be set based on \a
+  /// RF_MoveDistinctMDs.
+  ///
+  /// Returns the data for the node.
+  ///
+  /// \post Data::HasChangedAddress iff !RF_MoveDistinctMDs && N.isDistinct().
+  /// \post Worklist.back().first == &N.
+  /// \post Worklist.back().second == false.
+  Data &push(const MDNode &N);
+
+  /// Map a node operand, and return true if it changes.
+  ///
+  /// \post getMappedOp(Op) does not return None.
+  bool mapOperand(const Metadata *Op);
+
+  /// Get a previously mapped node.
+  Optional<Metadata *> getMappedOp(const Metadata *Op) const;
+
+  /// Try to pop a node off the worklist and store it in POT.
+  ///
+  /// Returns \c true if it popped; \c false if its operands need to be
+  /// visited.
+  ///
+  /// \post If Worklist.back().second == false: Worklist.back().second == true.
+  /// \post Else: Worklist.back() has been popped off and added to \a POT.
+  bool tryToPop();
+
+  /// Get a forward reference to a node to use as an operand.
+  ///
+  /// Returns \c Op if it's not changing; otherwise, lazily creates a temporary
+  /// node and returns it.
+  Metadata &getFwdReference(const Data &D, MDNode &Op);
+
+  /// Create a post-order traversal from the given node.
+  ///
+  /// This traverses the metadata graph deeply enough to map \c FirstN.  It
+  /// uses \a mapOperand() (indirectly, \a Mapper::mapSimplifiedNode()), so any
+  /// metadata that has already been mapped will not be part of the POT.
+  ///
+  /// \post \a POT is a post-order traversal ending with \c FirstN.
+  bool createPOT(const MDNode &FirstN);
+
+  /// Propagate changed operands through post-order traversal.
+  ///
+  /// Until fixed point, iteratively update:
+  ///
+  ///   - \a Data::HasChangedOps based on \a Data::HasChangedAddress of operands;
+  ///   - \a Data::HasChangedAddress based on Data::HasChangedOps.
+  ///
+  /// This algorithm never changes \a Data::HasChangedAddress for distinct
+  /// nodes.
+  ///
+  /// \post \a POT is a post-order traversal ending with \c FirstN.
+  void propagateChangedOperands();
+
+  /// Map all distinct nodes in POT.
+  ///
+  /// \post \a getMappedOp() returns the correct node for every distinct node.
+  void mapDistinctNodes();
+
+  /// Map all uniqued nodes in POT with the correct operands.
+  ///
+  /// \pre Distinct nodes are mapped (\a mapDistinctNodes() has been called).
+  /// \post \a getMappedOp() returns the correct node for every node.
+  /// \post \a MDNode::operands() is correct for every uniqued node.
+  /// \post \a MDNode::isResolved() returns true for every node.
+  void mapUniquedNodes();
+
+  /// Re-map the operands for distinct nodes in POT.
+  ///
+  /// \pre Distinct nodes are mapped (\a mapDistinctNodes() has been called).
+  /// \pre Uniqued nodes are mapped (\a mapUniquedNodes() has been called).
+  /// \post \a MDNode::operands() is correct for every distinct node.
+  void remapDistinctOperands();
+
+  /// Remap a node's operands.
+  ///
+  /// Iterate through operands and update them in place using \a getMappedOp()
+  /// and \a getFwdReference().
+  ///
+  /// \pre N.isDistinct() or N.isTemporary().
+  /// \pre Distinct nodes are mapped (\a mapDistinctNodes() has been called).
+  /// \pre If \c N is distinct, all uniqued nodes are already mapped.
+  void remapOperands(const Data &D, MDNode &N);
 };
 
 } // end namespace
@@ -151,12 +289,8 @@ Value *Mapper::mapValue(const Value *V) {
   // Global values do not need to be seeded into the VM if they
   // are using the identity mapping.
   if (isa<GlobalValue>(V)) {
-    if (Flags & RF_NullMapMissingGlobalValues) {
-      assert(!(Flags & RF_IgnoreMissingEntries) &&
-             "Illegal to specify both RF_NullMapMissingGlobalValues and "
-             "RF_IgnoreMissingEntries");
+    if (Flags & RF_NullMapMissingGlobalValues)
       return nullptr;
-    }
     return VM[V] = const_cast<Value*>(V);
   }
 
@@ -176,15 +310,32 @@ Value *Mapper::mapValue(const Value *V) {
 
   if (const auto *MDV = dyn_cast<MetadataAsValue>(V)) {
     const Metadata *MD = MDV->getMetadata();
+
+    if (auto *LAM = dyn_cast<LocalAsMetadata>(MD)) {
+      // Look through to grab the local value.
+      if (Value *LV = mapValue(LAM->getValue())) {
+        if (V == LAM->getValue())
+          return const_cast<Value *>(V);
+        return MetadataAsValue::get(V->getContext(), ValueAsMetadata::get(LV));
+      }
+
+      // FIXME: always return nullptr once Verifier::verifyDominatesUse()
+      // ensures metadata operands only reference defined SSA values.
+      return (Flags & RF_IgnoreMissingLocals)
+                 ? nullptr
+                 : MetadataAsValue::get(V->getContext(),
+                                        MDTuple::get(V->getContext(), None));
+    }
+
     // If this is a module-level metadata and we know that nothing at the module
     // level is changing, then use an identity mapping.
-    if (!isa<LocalAsMetadata>(MD) && (Flags & RF_NoModuleLevelChanges))
+    if (Flags & RF_NoModuleLevelChanges)
       return VM[V] = const_cast<Value *>(V);
 
+    // Map the metadata and turn it into a value.
     auto *MappedMD = mapMetadata(MD);
-    if (MD == MappedMD || (!MappedMD && (Flags & RF_IgnoreMissingEntries)))
+    if (MD == MappedMD)
       return VM[V] = const_cast<Value *>(V);
-
     return VM[V] = MetadataAsValue::get(V->getContext(), MappedMD);
   }
 
@@ -261,11 +412,11 @@ Value *Mapper::mapBlockAddress(const BlockAddress &BA) {
   // dummy basic block for now, and replace it once we've materialized all
   // the initializers.
   BasicBlock *BB;
-  if (F->isDeclaration()) {
-    BB = cast_or_null<BasicBlock>(mapValue(BA.getBasicBlock()));
-  } else {
+  if (F->empty()) {
     DelayedBBs.push_back(DelayedBasicBlock(BA));
     BB = DelayedBBs.back().TempBB.get();
+  } else {
+    BB = cast_or_null<BasicBlock>(mapValue(BA.getBasicBlock()));
   }
 
   return VM[&BA] = BlockAddress::get(F, BB ? BB : BA.getBasicBlock());
@@ -280,78 +431,224 @@ Metadata *Mapper::mapToSelf(const Metadata *MD) {
   return mapToMetadata(MD, const_cast<Metadata *>(MD));
 }
 
-Metadata *Mapper::mapMetadataOp(Metadata *Op) {
+bool MDNodeMapper::mapOperand(const Metadata *Op) {
+  if (!Op)
+    return false;
+
+  if (Optional<Metadata *> MappedOp = M.mapSimpleMetadata(Op)) {
+    assert((isa<MDString>(Op) || M.VM.getMappedMD(Op)) &&
+           "Expected result to be memoized");
+    return *MappedOp != Op;
+  }
+
+  return push(*cast<MDNode>(Op)).HasChangedAddress;
+}
+
+Optional<Metadata *> MDNodeMapper::getMappedOp(const Metadata *Op) const {
   if (!Op)
     return nullptr;
 
-  if (Metadata *MappedOp = mapMetadataImpl(Op))
-    return MappedOp;
-  // Use identity map if MappedOp is null and we can ignore missing entries.
-  if (Flags & RF_IgnoreMissingEntries)
-    return Op;
+  if (Optional<Metadata *> MappedOp = M.VM.getMappedMD(Op))
+    return *MappedOp;
 
-  return nullptr;
+  if (isa<MDString>(Op))
+    return const_cast<Metadata *>(Op);
+
+  return None;
 }
 
-/// Resolve uniquing cycles involving the given metadata.
-static void resolveCycles(Metadata *MD) {
-  if (auto *N = dyn_cast_or_null<MDNode>(MD))
+Metadata &MDNodeMapper::getFwdReference(const Data &D, MDNode &Op) {
+  auto Where = Info.find(&Op);
+  assert(Where != Info.end() && "Expected a valid reference");
+
+  auto &OpD = Where->second;
+  assert(OpD.ID > D.ID && "Expected a forward reference");
+
+  if (!OpD.HasChangedAddress)
+    return Op;
+
+  // Lazily construct a temporary node.
+  if (!OpD.Placeholder)
+    OpD.Placeholder = Op.clone();
+
+  return *OpD.Placeholder;
+}
+
+void MDNodeMapper::remapOperands(const Data &D, MDNode &N) {
+  for (unsigned I = 0, E = N.getNumOperands(); I != E; ++I) {
+    Metadata *Old = N.getOperand(I);
+    Metadata *New;
+    if (Optional<Metadata *> MappedOp = getMappedOp(Old)){
+      New = *MappedOp;
+    } else {
+      assert(!N.isDistinct() &&
+             "Expected all nodes to be pre-mapped for distinct operands");
+      MDNode &OldN = *cast<MDNode>(Old);
+      assert(!OldN.isDistinct() && "Expected distinct nodes to be pre-mapped");
+      New = &getFwdReference(D, OldN);
+    }
+
+    if (Old != New)
+      N.replaceOperandWith(I, New);
+  }
+}
+
+MDNodeMapper::Data &MDNodeMapper::push(const MDNode &N) {
+  auto Insertion = Info.insert(std::make_pair(&N, Data()));
+  auto &D = Insertion.first->second;
+  if (!Insertion.second)
+    return D;
+
+  // Add to the worklist; check for distinct nodes that are required to be
+  // copied.
+  Worklist.push_back(std::make_pair(&const_cast<MDNode &>(N), false));
+  D.HasChangedAddress = !(M.Flags & RF_MoveDistinctMDs) && N.isDistinct();
+  return D;
+}
+
+bool MDNodeMapper::tryToPop() {
+  if (!Worklist.back().second) {
+    Worklist.back().second = true;
+    return false;
+  }
+
+  MDNode *N = Worklist.pop_back_val().first;
+  Info[N].ID = POT.size();
+  POT.push_back(N);
+  return true;
+}
+
+bool MDNodeMapper::createPOT(const MDNode &FirstN) {
+  bool AnyChanges = false;
+
+  // Do a traversal of the unmapped subgraph, tracking whether operands change.
+  // In some cases, these changes will propagate naturally, but
+  // propagateChangedOperands() catches the general case.
+  AnyChanges |= push(FirstN).HasChangedAddress;
+  while (hasWork()) {
+    if (tryToPop())
+      continue;
+
+    MDNode &N = getCurrentNode();
+    bool LocalChanges = false;
+    for (const Metadata *Op : N.operands())
+      LocalChanges |= mapOperand(Op);
+
+    if (!LocalChanges)
+      continue;
+
+    AnyChanges = true;
+    auto &D = Info[&N];
+    D.HasChangedOps = true;
+
+    // Uniqued nodes change address when operands change.
+    if (!N.isDistinct())
+      D.HasChangedAddress = true;
+  }
+  return AnyChanges;
+}
+
+void MDNodeMapper::propagateChangedOperands() {
+  bool AnyChangedAddresses;
+  do {
+    AnyChangedAddresses = false;
+    for (MDNode *N : POT) {
+      auto &NI = Info[N];
+      if (NI.HasChangedOps)
+        continue;
+
+      if (!llvm::any_of(N->operands(), [&](const Metadata *Op) {
+            auto Where = Info.find(Op);
+            return Where != Info.end() && Where->second.HasChangedAddress;
+          }))
+        continue;
+
+      NI.HasChangedOps = true;
+      if (!N->isDistinct()) {
+        NI.HasChangedAddress = true;
+        AnyChangedAddresses = true;
+      }
+    }
+  } while (AnyChangedAddresses);
+}
+
+void MDNodeMapper::mapDistinctNodes() {
+  // Map all the distinct nodes in POT.
+  for (MDNode *N : POT) {
+    if (!N->isDistinct())
+      continue;
+
+    if (M.Flags & RF_MoveDistinctMDs)
+      M.mapToSelf(N);
+    else
+      M.mapToMetadata(N, MDNode::replaceWithDistinct(N->clone()));
+  }
+}
+
+void MDNodeMapper::mapUniquedNodes() {
+  // Construct uniqued nodes, building forward references as necessary.
+  SmallVector<MDNode *, 16> CyclicNodes;
+  for (auto *N : POT) {
+    if (N->isDistinct())
+      continue;
+
+    auto &D = Info[N];
+    assert(D.HasChangedAddress == D.HasChangedOps &&
+           "Uniqued nodes should change address iff ops change");
+    if (!D.HasChangedAddress) {
+      M.mapToSelf(N);
+      continue;
+    }
+
+    TempMDNode ClonedN = D.Placeholder ? std::move(D.Placeholder) : N->clone();
+    remapOperands(D, *ClonedN);
+    CyclicNodes.push_back(MDNode::replaceWithUniqued(std::move(ClonedN)));
+    M.mapToMetadata(N, CyclicNodes.back());
+  }
+
+  // Resolve cycles.
+  for (auto *N : CyclicNodes)
     if (!N->isResolved())
       N->resolveCycles();
 }
 
-bool Mapper::remapOperands(MDNode &Node) {
-  assert(!Node.isUniqued() && "Expected temporary or distinct node");
-  const bool IsDistinct = Node.isDistinct();
+void MDNodeMapper::remapDistinctOperands() {
+  for (auto *N : POT) {
+    if (!N->isDistinct())
+      continue;
 
-  bool AnyChanged = false;
-  for (unsigned I = 0, E = Node.getNumOperands(); I != E; ++I) {
-    Metadata *Old = Node.getOperand(I);
-    Metadata *New = mapMetadataOp(Old);
-    if (Old != New) {
-      AnyChanged = true;
-      Node.replaceOperandWith(I, New);
+    auto &D = Info[N];
+    if (!D.HasChangedOps)
+      continue;
 
-      // Resolve uniquing cycles underneath distinct nodes on the fly so they
-      // don't infect later operands.
-      if (IsDistinct)
-        resolveCycles(New);
-    }
+    assert(D.HasChangedAddress == !bool(M.Flags & RF_MoveDistinctMDs) &&
+           "Distinct nodes should change address iff they cannot be moved");
+    remapOperands(D, D.HasChangedAddress ? *cast<MDNode>(*getMappedOp(N)) : *N);
   }
-
-  return AnyChanged;
 }
 
-Metadata *Mapper::mapDistinctNode(const MDNode *Node) {
-  assert(Node->isDistinct() && "Expected distinct node");
+Metadata *MDNodeMapper::map(const MDNode &FirstN) {
+  assert(!(M.Flags & RF_NoModuleLevelChanges) &&
+         "MDNodeMapper::map assumes module-level changes");
+  assert(POT.empty() && "MDNodeMapper::map is not re-entrant");
 
-  MDNode *NewMD;
-  if (Flags & RF_MoveDistinctMDs)
-    NewMD = const_cast<MDNode *>(Node);
-  else
-    NewMD = MDNode::replaceWithDistinct(Node->clone());
+  // Require resolved nodes whenever metadata might be remapped.
+  assert(FirstN.isResolved() && "Unexpected unresolved node");
 
-  // Remap operands later.
-  DistinctWorklist.push_back(NewMD);
-  return mapToMetadata(Node, NewMD);
-}
-
-Metadata *Mapper::mapUniquedNode(const MDNode *Node) {
-  assert(Node->isUniqued() && "Expected uniqued node");
-
-  // Create a temporary node and map it upfront in case we have a uniquing
-  // cycle.  If necessary, this mapping will get updated by RAUW logic before
-  // returning.
-  auto ClonedMD = Node->clone();
-  mapToMetadata(Node, ClonedMD.get());
-  if (!remapOperands(*ClonedMD)) {
-    // No operands changed, so use the original.
-    ClonedMD->replaceAllUsesWith(const_cast<MDNode *>(Node));
-    return const_cast<MDNode *>(Node);
+  // Return early if nothing at all changed.
+  if (!createPOT(FirstN)) {
+    for (const MDNode *N : POT)
+      M.mapToSelf(N);
+    return &const_cast<MDNode &>(FirstN);
   }
 
-  // Uniquify the cloned node.
-  return MDNode::replaceWithUniqued(std::move(ClonedMD));
+  propagateChangedOperands();
+  mapDistinctNodes();
+  mapUniquedNodes();
+  remapDistinctOperands();
+
+  // Return the original node, remapped.
+  return *getMappedOp(&FirstN);
 }
 
 Optional<Metadata *> Mapper::mapSimpleMetadata(const Metadata *MD) {
@@ -360,20 +657,20 @@ Optional<Metadata *> Mapper::mapSimpleMetadata(const Metadata *MD) {
     return *NewMD;
 
   if (isa<MDString>(MD))
-    return mapToSelf(MD);
+    return const_cast<Metadata *>(MD);
 
-  if (isa<ConstantAsMetadata>(MD))
-    if ((Flags & RF_NoModuleLevelChanges))
-      return mapToSelf(MD);
+  // This is a module-level metadata.  If nothing at the module level is
+  // changing, use an identity mapping.
+  if ((Flags & RF_NoModuleLevelChanges))
+    return const_cast<Metadata *>(MD);
 
-  if (const auto *VMD = dyn_cast<ValueAsMetadata>(MD)) {
+  if (auto *CMD = dyn_cast<ConstantAsMetadata>(MD)) {
     // Disallow recursion into metadata mapping through mapValue.
     VM.disableMapMetadata();
-    Value *MappedV = mapValue(VMD->getValue());
+    Value *MappedV = mapValue(CMD->getValue());
     VM.enableMapMetadata();
 
-    if (VMD->getValue() == MappedV ||
-        (!MappedV && (Flags & RF_IgnoreMissingEntries)))
+    if (CMD->getValue() == MappedV)
       return mapToSelf(MD);
 
     return mapToMetadata(MD, MappedV ? ValueAsMetadata::get(MappedV) : nullptr);
@@ -381,27 +678,7 @@ Optional<Metadata *> Mapper::mapSimpleMetadata(const Metadata *MD) {
 
   assert(isa<MDNode>(MD) && "Expected a metadata node");
 
-  // If this is a module-level metadata and we know that nothing at the
-  // module level is changing, then use an identity mapping.
-  if (Flags & RF_NoModuleLevelChanges)
-    return mapToSelf(MD);
-
   return None;
-}
-
-Metadata *Mapper::mapMetadataImpl(const Metadata *MD) {
-  assert(VM.mayMapMetadata() && "Unexpected co-recursion through mapValue");
-  if (Optional<Metadata *> NewMD = mapSimpleMetadata(MD))
-    return *NewMD;
-
-  // Require resolved nodes whenever metadata might be remapped.
-  auto *Node = cast<MDNode>(MD);
-  assert(Node->isResolved() && "Unexpected unresolved node");
-
-  if (Node->isDistinct())
-    return mapDistinctNode(Node);
-
-  return mapUniquedNode(Node);
 }
 
 Metadata *llvm::MapMetadata(const Metadata *MD, ValueToValueMapTy &VM,
@@ -410,26 +687,33 @@ Metadata *llvm::MapMetadata(const Metadata *MD, ValueToValueMapTy &VM,
   return Mapper(VM, Flags, TypeMapper, Materializer).mapMetadata(MD);
 }
 
+Metadata *Mapper::mapLocalAsMetadata(const LocalAsMetadata &LAM) {
+  // Lookup the mapping for the value itself, and return the appropriate
+  // metadata.
+  if (Value *V = mapValue(LAM.getValue())) {
+    if (V == LAM.getValue())
+      return const_cast<LocalAsMetadata *>(&LAM);
+    return ValueAsMetadata::get(V);
+  }
+
+  // FIXME: always return nullptr once Verifier::verifyDominatesUse() ensures
+  // metadata operands only reference defined SSA values.
+  return (Flags & RF_IgnoreMissingLocals)
+             ? nullptr
+             : MDTuple::get(LAM.getContext(), None);
+}
+
 Metadata *Mapper::mapMetadata(const Metadata *MD) {
-  Metadata *NewMD = mapMetadataImpl(MD);
+  assert(MD && "Expected valid metadata");
+  assert(!isa<LocalAsMetadata>(MD) && "Unexpected local metadata");
 
-  // When there are no module-level changes, it's possible that the metadata
-  // graph has temporaries.  Skip the logic to resolve cycles, since it's
-  // unnecessary (and invalid) in that case.
-  if (Flags & RF_NoModuleLevelChanges)
-    return NewMD;
+  if (Optional<Metadata *> NewMD = mapSimpleMetadata(MD))
+    return *NewMD;
 
-  // Resolve cycles involving the entry metadata.
-  resolveCycles(NewMD);
-
-  return NewMD;
+  return MDNodeMapper(*this).map(*cast<MDNode>(MD));
 }
 
 Mapper::~Mapper() {
-  // Remap the operands of distinct MDNodes.
-  while (!DistinctWorklist.empty())
-    remapOperands(*DistinctWorklist.pop_back_val());
-
   // Materialize global initializers.
   while (!DelayedInits.empty()) {
     auto Init = DelayedInits.pop_back_val();
@@ -443,8 +727,7 @@ Mapper::~Mapper() {
     DBB.TempBB->replaceAllUsesWith(BB ? BB : DBB.OldBB);
   }
 
-  // We don't expect any of these to grow after clearing.
-  assert(DistinctWorklist.empty());
+  // We don't expect these to grow after clearing.
   assert(DelayedInits.empty());
   assert(DelayedBBs.empty());
 }
@@ -456,32 +739,33 @@ MDNode *llvm::MapMetadata(const MDNode *MD, ValueToValueMapTy &VM,
                                           Flags, TypeMapper, Materializer));
 }
 
-/// RemapInstruction - Convert the instruction operands from referencing the
-/// current values into those specified by VMap.
-///
-void llvm::RemapInstruction(Instruction *I, ValueToValueMapTy &VMap,
+void llvm::RemapInstruction(Instruction *I, ValueToValueMapTy &VM,
                             RemapFlags Flags, ValueMapTypeRemapper *TypeMapper,
-                            ValueMaterializer *Materializer){
+                            ValueMaterializer *Materializer) {
+  Mapper(VM, Flags, TypeMapper, Materializer).remapInstruction(I);
+}
+
+void Mapper::remapInstruction(Instruction *I) {
   // Remap operands.
   for (User::op_iterator op = I->op_begin(), E = I->op_end(); op != E; ++op) {
-    Value *V = MapValue(*op, VMap, Flags, TypeMapper, Materializer);
+    Value *V = mapValue(*op);
     // If we aren't ignoring missing entries, assert that something happened.
     if (V)
       *op = V;
     else
-      assert((Flags & RF_IgnoreMissingEntries) &&
+      assert((Flags & RF_IgnoreMissingLocals) &&
              "Referenced value not in value map!");
   }
 
   // Remap phi nodes' incoming blocks.
   if (PHINode *PN = dyn_cast<PHINode>(I)) {
     for (unsigned i = 0, e = PN->getNumIncomingValues(); i != e; ++i) {
-      Value *V = MapValue(PN->getIncomingBlock(i), VMap, Flags);
+      Value *V = mapValue(PN->getIncomingBlock(i));
       // If we aren't ignoring missing entries, assert that something happened.
       if (V)
         PN->setIncomingBlock(i, cast<BasicBlock>(V));
       else
-        assert((Flags & RF_IgnoreMissingEntries) &&
+        assert((Flags & RF_IgnoreMissingLocals) &&
                "Referenced block not in value map!");
     }
   }
@@ -491,7 +775,7 @@ void llvm::RemapInstruction(Instruction *I, ValueToValueMapTy &VMap,
   I->getAllMetadata(MDs);
   for (const auto &MI : MDs) {
     MDNode *Old = MI.second;
-    MDNode *New = MapMetadata(Old, VMap, Flags, TypeMapper, Materializer);
+    MDNode *New = cast_or_null<MDNode>(mapMetadata(Old));
     if (New != Old)
       I->setMetadata(MI.first, New);
   }
@@ -519,4 +803,33 @@ void llvm::RemapInstruction(Instruction *I, ValueToValueMapTy &VMap,
         TypeMapper->remapType(GEP->getResultElementType()));
   }
   I->mutateType(TypeMapper->remapType(I->getType()));
+}
+
+void llvm::RemapFunction(Function &F, ValueToValueMapTy &VM, RemapFlags Flags,
+                         ValueMapTypeRemapper *TypeMapper,
+                         ValueMaterializer *Materializer) {
+  Mapper(VM, Flags, TypeMapper, Materializer).remapFunction(F);
+}
+
+void Mapper::remapFunction(Function &F) {
+  // Remap the operands.
+  for (Use &Op : F.operands())
+    if (Op)
+      Op = mapValue(Op);
+
+  // Remap the metadata attachments.
+  SmallVector<std::pair<unsigned, MDNode *>, 8> MDs;
+  F.getAllMetadata(MDs);
+  for (const auto &I : MDs)
+    F.setMetadata(I.first, cast_or_null<MDNode>(mapMetadata(I.second)));
+
+  // Remap the argument types.
+  if (TypeMapper)
+    for (Argument &A : F.args())
+      A.mutateType(TypeMapper->remapType(A.getType()));
+
+  // Remap the instructions.
+  for (BasicBlock &BB : F)
+    for (Instruction &I : BB)
+      remapInstruction(&I);
 }
