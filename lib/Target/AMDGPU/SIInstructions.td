@@ -423,13 +423,13 @@ defm S_GETREG_B32 : SOPK_32 <sopk<0x12, 0x11>, "s_getreg_b32", []>;
 
 defm S_SETREG_B32 : SOPK_m <
   sopk<0x13, 0x12>, "s_setreg_b32", (outs),
-  (ins SReg_32:$sdst, u16imm:$simm16), " $sdst, $simm16"
+  (ins SReg_32:$sdst, u16imm:$simm16), " $simm16, $sdst"
 >;
 // FIXME: Not on SI?
 //defm S_GETREG_REGRD_B32 : SOPK_32 <sopk<0x14, 0x13>, "s_getreg_regrd_b32", []>;
 defm S_SETREG_IMM32_B32 : SOPK_IMM32 <
   sopk<0x15, 0x14>, "s_setreg_imm32_b32", (outs),
-  (ins i32imm:$imm, u16imm:$simm16), " $imm, $simm16"
+  (ins i32imm:$imm, u16imm:$simm16), " $simm16, $imm"
 >;
 
 //===----------------------------------------------------------------------===//
@@ -2014,7 +2014,23 @@ def SI_KILL : InstSI <
 
 } // End mayLoad = 1, mayStore = 1, hasSideEffects = 1
 
-let Uses = [EXEC], Defs = [EXEC,VCC,M0] in {
+// Used as an isel pseudo to directly emit initialization with an
+// s_mov_b32 rather than a copy of another initialized
+// register. MachineCSE skips copies, and we don't want to have to
+// fold operands before it runs.
+def SI_INIT_M0 : InstSI <
+  (outs),
+  (ins SSrc_32:$src), "", []> {
+  let Defs = [M0];
+  let usesCustomInserter = 1;
+  let isPseudo = 1;
+  let isCodeGenOnly = 1;
+  let isAsCheapAsAMove = 1;
+  let SALU = 1;
+  let isReMaterializable = 1;
+}
+
+let Uses = [EXEC], Defs = [EXEC, VCC, M0] in {
 
 class SI_INDIRECT_SRC<RegisterClass rc> : InstSI <
   (outs VGPR_32:$dst, SReg_64:$temp),

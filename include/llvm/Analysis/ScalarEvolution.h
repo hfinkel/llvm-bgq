@@ -26,7 +26,6 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/ConstantRange.h"
-#include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
@@ -35,7 +34,6 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/DataTypes.h"
-#include <map>
 
 namespace llvm {
   class APInt;
@@ -55,6 +53,7 @@ namespace llvm {
   class SCEVExpander;
   class SCEVPredicate;
   class SCEVUnknown;
+  class Function;
 
   template <> struct FoldingSetTrait<SCEV>;
   template <> struct FoldingSetTrait<SCEVPredicate>;
@@ -1691,6 +1690,9 @@ namespace llvm {
     ScalarEvolution *getSE() const { return &SE; }
     /// We need to explicitly define the copy constructor because of FlagsMap.
     PredicatedScalarEvolution(const PredicatedScalarEvolution&);
+    /// Print the SCEV mappings done by the Predicated Scalar Evolution.
+    /// The printed text is indented by \p Depth.
+    void print(raw_ostream &OS, unsigned Depth) const;
   private:
     /// \brief Increments the version number of the predicate.
     /// This needs to be called every time the SCEV predicate changes.

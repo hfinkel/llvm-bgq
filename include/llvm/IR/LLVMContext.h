@@ -16,7 +16,6 @@
 #define LLVM_IR_LLVMCONTEXT_H
 
 #include "llvm/Support/CBindingWrapping.h"
-#include "llvm/Support/Compiler.h"
 #include "llvm/Support/Options.h"
 
 namespace llvm {
@@ -26,6 +25,8 @@ class StringRef;
 class Twine;
 class Instruction;
 class Module;
+class MDString;
+class DIType;
 class SMDiagnostic;
 class DiagnosticInfo;
 template <typename T> class SmallVectorImpl;
@@ -95,7 +96,6 @@ public:
   /// tag registered with an LLVMContext has an unique ID.
   uint32_t getOperandBundleTagID(StringRef Tag) const;
 
-
   /// Define the GC for a function
   void setGC(const Function &Fn, std::string GCName);
 
@@ -114,6 +114,23 @@ public:
   /// GlobalValue). Clients can use this flag to save memory and runtime,
   /// especially in release mode.
   void setDiscardValueNames(bool Discard);
+
+  /// Whether there is a string map for uniquing debug info
+  /// identifiers across the context.  Off by default.
+  bool isODRUniquingDebugTypes() const;
+  void enableDebugTypeODRUniquing();
+  void disableDebugTypeODRUniquing();
+
+  /// Get or insert the DIType mapped to the given string.
+  ///
+  /// Returns the address of the current \a DIType pointer mapped to \c S,
+  /// inserting a mapping to \c nullptr if \c S was not previously mapped.
+  /// This method has no effect (and returns \c nullptr instead of a valid
+  /// address) if \a isODRUniquingDebugTypes() is \c false.
+  ///
+  /// \post If \a isODRUniquingDebugTypes(), \c S will have a (possibly null)
+  /// mapping.  \note The returned address is only valid until the next call.
+  DIType **getOrInsertODRUniquedType(const MDString &S);
 
   typedef void (*InlineAsmDiagHandlerTy)(const SMDiagnostic&, void *Context,
                                          unsigned LocCookie);
@@ -234,10 +251,6 @@ private:
   // Module needs access to the add/removeModule methods.
   friend class Module;
 };
-
-/// getGlobalContext - Returns a global context.  This is for LLVM clients that
-/// only care about operating on a single thread.
-extern LLVMContext &getGlobalContext();
 
 // Create wrappers for C Binding types (see CBindingWrapping.h).
 DEFINE_SIMPLE_CONVERSION_FUNCTIONS(LLVMContext, LLVMContextRef)

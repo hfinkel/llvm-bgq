@@ -14,7 +14,6 @@
 #ifndef LLVM_TRANSFORMS_UTILS_VECTORUTILS_H
 #define LLVM_TRANSFORMS_UTILS_VECTORUTILS_H
 
-#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -22,7 +21,8 @@
 
 namespace llvm {
 
-struct DemandedBits;
+template <typename T> class ArrayRef;
+class DemandedBits;
 class GetElementPtrInst;
 class Loop;
 class ScalarEvolution;

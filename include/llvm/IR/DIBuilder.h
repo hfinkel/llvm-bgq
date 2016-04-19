@@ -15,8 +15,6 @@
 #ifndef LLVM_IR_DIBUILDER_H
 #define LLVM_IR_DIBUILDER_H
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/TrackingMDRef.h"
 #include "llvm/IR/ValueHandle.h"
@@ -31,6 +29,7 @@ namespace llvm {
   class Constant;
   class LLVMContext;
   class StringRef;
+  template <typename T> class ArrayRef;
 
   class DIBuilder {
     Module &M;
@@ -403,9 +402,9 @@ namespace llvm {
         uint64_t AlignInBits = 0, unsigned Flags = DINode::FlagFwdDecl,
         StringRef UniqueIdentifier = "");
 
-    /// Retain DIType* in a module even if it is not referenced
+    /// Retain DIScope* in a module even if it is not referenced
     /// through debug info anchors.
-    void retainType(DIType *T);
+    void retainType(DIScope *T);
 
     /// Create unspecified parameter type
     /// for a subroutine type.
@@ -524,17 +523,6 @@ namespace llvm {
         bool isDefinition, unsigned ScopeLine, unsigned Flags = 0,
         bool isOptimized = false, DITemplateParameterArray TParams = nullptr,
         DISubprogram *Decl = nullptr);
-
-    /// FIXME: this is added for dragonegg. Once we update dragonegg
-    /// to call resolve function, this will be removed.
-    DISubprogram *createFunction(DIScopeRef Scope, StringRef Name,
-                                 StringRef LinkageName, DIFile *File,
-                                 unsigned LineNo, DISubroutineType *Ty,
-                                 bool isLocalToUnit, bool isDefinition,
-                                 unsigned ScopeLine, unsigned Flags = 0,
-                                 bool isOptimized = false,
-                                 DITemplateParameterArray TParams = nullptr,
-                                 DISubprogram *Decl = nullptr);
 
     /// Create a new descriptor for the specified C++ method.
     /// See comments in \a DISubprogram* for descriptions of these fields.

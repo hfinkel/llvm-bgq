@@ -220,7 +220,7 @@ void PassManagerBuilder::addPGOInstrPasses(legacy::PassManagerBase &MPM) {
     // Add the profile lowering pass.
     InstrProfOptions Options;
     Options.InstrProfileOutput = PGOInstrGen;
-    MPM.add(createInstrProfilingPass(Options));
+    MPM.add(createInstrProfilingLegacyPass(Options));
   }
   if (!PGOInstrUse.empty())
     MPM.add(createPGOInstrumentationUsePass(PGOInstrUse));
@@ -234,6 +234,8 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   else
     MPM.add(createScalarReplAggregatesPass(-1, false));
   MPM.add(createEarlyCSEPass());              // Catch trivial redundancies
+  // Speculative execution if the target has divergent branches; otherwise nop.
+  MPM.add(createSpeculativeExecutionIfHasBranchDivergencePass());
   MPM.add(createJumpThreadingPass());         // Thread jumps.
   MPM.add(createCorrelatedValuePropagationPass()); // Propagate conditionals
   MPM.add(createCFGSimplificationPass());     // Merge & remove BBs

@@ -15,7 +15,6 @@
 #ifndef LLVM_TRANSFORMS_SCALAR_H
 #define LLVM_TRANSFORMS_SCALAR_H
 
-#include "llvm/ADT/StringRef.h"
 #include <functional>
 
 namespace llvm {
@@ -429,6 +428,10 @@ createSeparateConstOffsetFromGEPPass(const TargetMachine *TM = nullptr,
 // speculative execution on targets where branches are expensive.
 //
 FunctionPass *createSpeculativeExecutionPass();
+
+// Same as createSpeculativeExecutionPass, but does nothing unless
+// TargetTransformInfo::hasBranchDivergence() is true.
+FunctionPass *createSpeculativeExecutionIfHasBranchDivergencePass();
 
 //===----------------------------------------------------------------------===//
 //

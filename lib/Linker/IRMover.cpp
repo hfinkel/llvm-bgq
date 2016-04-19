@@ -362,6 +362,9 @@ public:
   void materializeInitFor(GlobalValue *New, GlobalValue *Old) override;
 };
 
+/// Type of the Metadata map in \a ValueToValueMapTy.
+typedef DenseMap<const Metadata *, TrackingMDRef> MDMapT;
+
 /// This is responsible for keeping track of the state used for moving data
 /// from SrcM to DstM.
 class IRLinker {
@@ -374,6 +377,9 @@ class IRLinker {
   TypeMapTy TypeMap;
   GlobalValueMaterializer GValMaterializer;
   LocalValueMaterializer LValMaterializer;
+
+  /// A metadata map that's shared between IRLinker instances.
+  MDMapT &SharedMDs;
 
   /// Mapping of values from what they used to be in Src, to what they are now
   /// in DstM.  ValueToValueMapTy is a ValueMap, which involves some overhead
@@ -397,13 +403,9 @@ class IRLinker {
 
   bool HasError = false;
 
-  /// Flags to pass to value mapper invocations.
-  RemapFlags ValueMapperFlags = RF_MoveDistinctMDs | RF_IgnoreMissingLocals;
-
-  /// Set of subprogram metadata that does not need to be linked into the
-  /// destination module, because the functions were not imported directly
-  /// or via an inlined body in an imported function.
-  bool HasUnneededSPs = false;
+  /// Entry point for mapping values and alternate context for mapping aliases.
+  ValueMapper Mapper;
+  unsigned AliasMCID;
 
   /// Handles cloning of a global values from the source module into
   /// the destination module, including setting the attributes and visibility.
@@ -470,24 +472,22 @@ class IRLinker {
 
   void linkNamedMDNodes();
 
-  /// Look for subprograms referenced from !llvm.dbg.cu that we don't want to
-  /// link in and map it to nullptr.
-  ///
-  /// \post HasUnneededSPs is true iff any unneeded subprograms were found.
-  void mapUnneededSubprograms();
-
-  /// Remove null subprograms from !llvm.dbg.cu.
-  void stripNullSubprograms(DICompileUnit *CU);
-
 public:
-  IRLinker(Module &DstM, IRMover::IdentifiedStructTypeSet &Set,
-           std::unique_ptr<Module> SrcM, ArrayRef<GlobalValue *> ValuesToLink,
+  IRLinker(Module &DstM, MDMapT &SharedMDs,
+           IRMover::IdentifiedStructTypeSet &Set, std::unique_ptr<Module> SrcM,
+           ArrayRef<GlobalValue *> ValuesToLink,
            std::function<void(GlobalValue &, IRMover::ValueAdder)> AddLazyFor)
       : DstM(DstM), SrcM(std::move(SrcM)), AddLazyFor(AddLazyFor), TypeMap(Set),
-        GValMaterializer(*this), LValMaterializer(*this) {
+        GValMaterializer(*this), LValMaterializer(*this), SharedMDs(SharedMDs),
+        Mapper(ValueMap, RF_MoveDistinctMDs | RF_IgnoreMissingLocals, &TypeMap,
+               &GValMaterializer),
+        AliasMCID(Mapper.registerAlternateMappingContext(AliasValueMap,
+                                                         &LValMaterializer)) {
+    ValueMap.MD().swap(SharedMDs);
     for (GlobalValue *GV : ValuesToLink)
       maybeAdd(GV);
   }
+  ~IRLinker() { ValueMap.MD().swap(SharedMDs); }
 
   bool run();
   Value *materializeDeclFor(Value *V, bool ForAlias);
@@ -549,7 +549,7 @@ void IRLinker::materializeInitFor(GlobalValue *New, GlobalValue *Old,
     if (!F->isDeclaration())
       return;
   } else if (auto *V = dyn_cast<GlobalVariable>(New)) {
-    if (V->hasInitializer())
+    if (V->hasInitializer() || V->hasAppendingLinkage())
       return;
   } else {
     auto *A = cast<GlobalAlias>(New);
@@ -726,6 +726,10 @@ Constant *IRLinker::linkAppendingVarProto(GlobalVariable *DstGV,
   Type *EltTy = cast<ArrayType>(TypeMap.get(SrcGV->getValueType()))
                     ->getElementType();
 
+  // FIXME: This upgrade is done during linking to support the C API.  Once the
+  // old form is deprecated, we should move this upgrade to
+  // llvm::UpgradeGlobalVariable() and simplify the logic here and in
+  // Mapper::mapAppendingVariable() in ValueMapper.cpp.
   StringRef Name = SrcGV->getName();
   bool IsNewStructor = false;
   bool IsOldStructor = false;
@@ -743,8 +747,10 @@ Constant *IRLinker::linkAppendingVarProto(GlobalVariable *DstGV,
     EltTy = StructType::get(SrcGV->getContext(), Tys, false);
   }
 
+  uint64_t DstNumElements = 0;
   if (DstGV) {
     ArrayType *DstTy = cast<ArrayType>(DstGV->getValueType());
+    DstNumElements = DstTy->getNumElements();
 
     if (!SrcGV->hasAppendingLinkage() || !DstGV->hasAppendingLinkage()) {
       emitError(
@@ -788,10 +794,6 @@ Constant *IRLinker::linkAppendingVarProto(GlobalVariable *DstGV,
     }
   }
 
-  SmallVector<Constant *, 16> DstElements;
-  if (DstGV)
-    getArrayElements(DstGV->getInitializer(), DstElements);
-
   SmallVector<Constant *, 16> SrcElements;
   getArrayElements(SrcGV->getInitializer(), SrcElements);
 
@@ -807,7 +809,7 @@ Constant *IRLinker::linkAppendingVarProto(GlobalVariable *DstGV,
                          return !shouldLink(DGV, *Key);
                        }),
         SrcElements.end());
-  uint64_t NewSize = DstElements.size() + SrcElements.size();
+  uint64_t NewSize = DstNumElements + SrcElements.size();
   ArrayType *NewType = ArrayType::get(EltTy, NewSize);
 
   // Create the new global variable.
@@ -821,28 +823,9 @@ Constant *IRLinker::linkAppendingVarProto(GlobalVariable *DstGV,
 
   Constant *Ret = ConstantExpr::getBitCast(NG, TypeMap.get(SrcGV->getType()));
 
-  // Stop recursion.
-  ValueMap[SrcGV] = Ret;
-
-  for (auto *V : SrcElements) {
-    Constant *NewV;
-    if (IsOldStructor) {
-      auto *S = cast<ConstantStruct>(V);
-      auto *E1 = MapValue(S->getOperand(0), ValueMap, ValueMapperFlags,
-                          &TypeMap, &GValMaterializer);
-      auto *E2 = MapValue(S->getOperand(1), ValueMap, ValueMapperFlags,
-                          &TypeMap, &GValMaterializer);
-      Value *Null = Constant::getNullValue(VoidPtrTy);
-      NewV =
-          ConstantStruct::get(cast<StructType>(EltTy), E1, E2, Null, nullptr);
-    } else {
-      NewV =
-          MapValue(V, ValueMap, ValueMapperFlags, &TypeMap, &GValMaterializer);
-    }
-    DstElements.push_back(NewV);
-  }
-
-  NG->setInitializer(ConstantArray::get(NewType, DstElements));
+  Mapper.scheduleMapAppendingVariable(*NG,
+                                      DstGV ? DstGV->getInitializer() : nullptr,
+                                      IsOldStructor, SrcElements);
 
   // Replace any uses of the two global variables with uses of the new
   // global.
@@ -949,8 +932,7 @@ Constant *IRLinker::linkGlobalValueProto(GlobalValue *SGV, bool ForAlias) {
 /// referenced are in Dest.
 void IRLinker::linkGlobalInit(GlobalVariable &Dst, GlobalVariable &Src) {
   // Figure out what the initializer looks like in the dest module.
-  Dst.setInitializer(MapValue(Src.getInitializer(), ValueMap, ValueMapperFlags,
-                              &TypeMap, &GValMaterializer));
+  Mapper.scheduleMapGlobalInitializer(Dst, *Src.getInitializer());
 }
 
 /// Copy the source function over into the dest function and fix up references
@@ -982,15 +964,12 @@ bool IRLinker::linkFunctionBody(Function &Dst, Function &Src) {
   Dst.getBasicBlockList().splice(Dst.end(), Src.getBasicBlockList());
 
   // Everything has been moved over.  Remap it.
-  RemapFunction(Dst, ValueMap, ValueMapperFlags, &TypeMap, &GValMaterializer);
+  Mapper.scheduleRemapFunction(Dst);
   return false;
 }
 
 void IRLinker::linkAliasBody(GlobalAlias &Dst, GlobalAlias &Src) {
-  Constant *Aliasee = Src.getAliasee();
-  Constant *Val = MapValue(Aliasee, AliasValueMap, ValueMapperFlags, &TypeMap,
-                           &LValMaterializer);
-  Dst.setAliasee(Val);
+  Mapper.scheduleMapGlobalAliasee(Dst, *Src.getAliasee(), AliasMCID);
 }
 
 bool IRLinker::linkGlobalValueBody(GlobalValue &Dst, GlobalValue &Src) {
@@ -1004,60 +983,8 @@ bool IRLinker::linkGlobalValueBody(GlobalValue &Dst, GlobalValue &Src) {
   return false;
 }
 
-void IRLinker::mapUnneededSubprograms() {
-  // Track unneeded nodes to make it simpler to handle the case
-  // where we are checking if an already-mapped SP is needed.
-  NamedMDNode *CompileUnits = SrcM->getNamedMetadata("llvm.dbg.cu");
-  if (!CompileUnits)
-    return;
-
-  // Seed the ValueMap with the imported entities, in case they reference new
-  // subprograms.
-  // FIXME: The DISubprogram for functions not linked in but kept due to
-  // being referenced by a DIImportedEntity should also get their
-  // IsDefinition flag is unset.
-  for (unsigned I = 0, E = CompileUnits->getNumOperands(); I != E; ++I) {
-    if (MDTuple *IEs = cast<DICompileUnit>(CompileUnits->getOperand(I))
-                           ->getImportedEntities()
-                           .get())
-      (void)MapMetadata(IEs, ValueMap,
-                        ValueMapperFlags | RF_NullMapMissingGlobalValues,
-                        &TypeMap, &GValMaterializer);
-  }
-
-  // Try to insert nullptr into the map for any SP not already mapped.  If
-  // the insertion succeeds, we don't need this subprogram.
-  for (unsigned I = 0, E = CompileUnits->getNumOperands(); I != E; ++I) {
-    for (auto *Op :
-         cast<DICompileUnit>(CompileUnits->getOperand(I))->getSubprograms())
-      if (ValueMap.MD().insert(std::make_pair(Op, TrackingMDRef())).second)
-        HasUnneededSPs = true;
-  }
-}
-
-// Squash null subprograms from the given compile unit's subprogram list.
-void IRLinker::stripNullSubprograms(DICompileUnit *CU) {
-  // There won't be any nulls if we didn't have any subprograms marked
-  // as unneeded.
-  if (!HasUnneededSPs)
-    return;
-  SmallVector<Metadata *, 16> NewSPs;
-  NewSPs.reserve(CU->getSubprograms().size());
-  bool FoundNull = false;
-  for (DISubprogram *SP : CU->getSubprograms()) {
-    if (!SP) {
-      FoundNull = true;
-      continue;
-    }
-    NewSPs.push_back(SP);
-  }
-  if (FoundNull)
-    CU->replaceSubprograms(MDTuple::get(CU->getContext(), NewSPs));
-}
-
 /// Insert all of the named MDNodes in Src into the Dest module.
 void IRLinker::linkNamedMDNodes() {
-  mapUnneededSubprograms();
   const NamedMDNode *SrcModFlags = SrcM->getModuleFlagsMetadata();
   for (const NamedMDNode &NMD : SrcM->named_metadata()) {
     // Don't link module flags here. Do them separately.
@@ -1065,17 +992,8 @@ void IRLinker::linkNamedMDNodes() {
       continue;
     NamedMDNode *DestNMD = DstM.getOrInsertNamedMetadata(NMD.getName());
     // Add Src elements into Dest node.
-    for (const MDNode *op : NMD.operands()) {
-      MDNode *DestMD = MapMetadata(
-          op, ValueMap, ValueMapperFlags | RF_NullMapMissingGlobalValues,
-          &TypeMap, &GValMaterializer);
-      // For each newly mapped compile unit remove any null subprograms,
-      // which occur when mapUnneededSubprograms identified any as unneeded
-      // in the dest module.
-      if (auto *CU = dyn_cast<DICompileUnit>(DestMD))
-        stripNullSubprograms(CU);
-      DestNMD->addOperand(DestMD);
-    }
+    for (const MDNode *Op : NMD.operands())
+      DestNMD->addOperand(Mapper.mapMDNode(*Op));
   }
 }
 
@@ -1315,7 +1233,7 @@ bool IRLinker::run() {
       continue;
 
     assert(!GV->isDeclaration());
-    MapValue(GV, ValueMap, ValueMapperFlags, &TypeMap, &GValMaterializer);
+    Mapper.mapValue(*GV);
     if (HasError)
       return true;
   }
@@ -1323,6 +1241,7 @@ bool IRLinker::run() {
   // Note that we are done linking global value bodies. This prevents
   // metadata linking from creating new references.
   DoneLinkingBodies = true;
+  Mapper.addFlags(RF_NullMapMissingGlobalValues);
 
   // Remap all of the named MDNodes in Src into the DstM module. We do this
   // after linking GlobalValues so that MDNodes that reference GlobalValues
@@ -1440,8 +1359,8 @@ IRMover::IRMover(Module &M) : Composite(M) {
 bool IRMover::move(
     std::unique_ptr<Module> Src, ArrayRef<GlobalValue *> ValuesToLink,
     std::function<void(GlobalValue &, ValueAdder Add)> AddLazyFor) {
-  IRLinker TheIRLinker(Composite, IdentifiedStructTypes, std::move(Src),
-                       ValuesToLink, AddLazyFor);
+  IRLinker TheIRLinker(Composite, SharedMDs, IdentifiedStructTypes,
+                       std::move(Src), ValuesToLink, AddLazyFor);
   bool RetCode = TheIRLinker.run();
   Composite.dropTriviallyDeadConstantArrays();
   return RetCode;
