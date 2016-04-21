@@ -430,7 +430,7 @@ bool ModuleLinker::linkIfNeeded(GlobalValue &GV) {
 
 void ModuleLinker::addLazyFor(GlobalValue &GV, IRMover::ValueAdder Add) {
   // Add these to the internalize list
-  if (!GV.hasLinkOnceLinkage())
+  if (!GV.hasLinkOnceLinkage() && !shouldLinkOnlyNeeded())
     return;
 
   if (shouldInternalizeLinkedSymbols())
