@@ -114,6 +114,14 @@ class BitcodeReaderMetadataList {
   /// move) on resize, and TrackingMDRef is very expensive to copy.
   SmallVector<TrackingMDRef, 1> MetadataPtrs;
 
+  /// Structures for resolving old type refs.
+  struct {
+    SmallDenseMap<MDString *, TempMDTuple, 1> Unknown;
+    SmallDenseMap<MDString *, DICompositeType *, 1> Final;
+    SmallDenseMap<MDString *, DICompositeType *, 1> FwdDecls;
+    SmallVector<std::pair<TrackingMDRef, TempMDTuple>, 1> Arrays;
+  } OldTypeRefs;
+
   LLVMContext &Context;
 public:
   BitcodeReaderMetadataList(LLVMContext &C)
@@ -159,6 +167,18 @@ public:
   void assignValue(Metadata *MD, unsigned Idx);
   void tryToResolveCycles();
   bool hasFwdRefs() const { return AnyFwdRefs; }
+
+  /// Upgrade a type that had an MDString reference.
+  void addTypeRef(MDString &UUID, DICompositeType &CT);
+
+  /// Upgrade a type that had an MDString reference.
+  Metadata *upgradeTypeRef(Metadata *MaybeUUID);
+
+  /// Upgrade a type ref array that may have MDString references.
+  Metadata *upgradeTypeRefArray(Metadata *MaybeTuple);
+
+private:
+  Metadata *resolveTypeRefArray(Metadata *MaybeTuple);
 };
 
 class BitcodeReader : public GVMaterializer {
@@ -467,7 +487,10 @@ class ModuleSummaryIndexBitcodeReader {
   // call graph edges read from the function summary from referencing
   // callees by their ValueId to using the GUID instead, which is how
   // they are recorded in the summary index being built.
-  DenseMap<unsigned, GlobalValue::GUID> ValueIdToCallGraphGUIDMap;
+  // We save a second GUID which is the same as the first one, but ignoring the
+  // linkage, i.e. for value other than local linkage they are identical.
+  DenseMap<unsigned, std::pair<GlobalValue::GUID, GlobalValue::GUID>>
+      ValueIdToCallGraphGUIDMap;
 
   /// Map to save the association between summary offset in the VST to the
   /// GlobalValueInfo object created when parsing it. Used to access the
@@ -523,7 +546,8 @@ private:
   std::error_code initStream(std::unique_ptr<DataStreamer> Streamer);
   std::error_code initStreamFromBuffer();
   std::error_code initLazyStream(std::unique_ptr<DataStreamer> Streamer);
-  GlobalValue::GUID getGUIDFromValueId(unsigned ValueId);
+  std::pair<GlobalValue::GUID, GlobalValue::GUID>
+  getGUIDFromValueId(unsigned ValueId);
   GlobalValueInfo *getInfoFromSummaryOffset(uint64_t Offset);
 };
 } // end anonymous namespace
@@ -712,6 +736,18 @@ static GlobalValue::LinkageTypes getDecodedLinkage(unsigned Val) {
   case 19:
     return GlobalValue::LinkOnceODRLinkage;
   }
+}
+
+// Decode the flags for GlobalValue in the summary
+static GlobalValueSummary::GVFlags getDecodedGVSummaryFlags(uint64_t RawFlags,
+                                                            uint64_t Version) {
+  // Summary were not emitted before LLVM 3.9, we don't need to upgrade Linkage
+  // like getDecodedLinkage() above. Any future change to the linkage enum and
+  // to getDecodedLinkage() will need to be taken into account here as above.
+  auto Linkage = GlobalValue::LinkageTypes(RawFlags & 0xF); // 4 bits
+  RawFlags = RawFlags >> 4;
+  auto HasSection = RawFlags & 0x1; // bool
+  return GlobalValueSummary::GVFlags(Linkage, HasSection);
 }
 
 static GlobalValue::VisibilityTypes getDecodedVisibility(unsigned Val) {
@@ -1118,12 +1154,46 @@ MDNode *BitcodeReaderMetadataList::getMDNodeFwdRefOrNull(unsigned Idx) {
 }
 
 void BitcodeReaderMetadataList::tryToResolveCycles() {
-  if (!AnyFwdRefs)
-    // Nothing to do.
-    return;
-
   if (NumFwdRefs)
     // Still forward references... can't resolve cycles.
+    return;
+
+  bool DidReplaceTypeRefs = false;
+
+  // Give up on finding a full definition for any forward decls that remain.
+  for (const auto &Ref : OldTypeRefs.FwdDecls)
+    OldTypeRefs.Final.insert(Ref);
+  OldTypeRefs.FwdDecls.clear();
+
+  // Upgrade from old type ref arrays.  In strange cases, this could add to
+  // OldTypeRefs.Unknown.
+  for (const auto &Array : OldTypeRefs.Arrays) {
+    DidReplaceTypeRefs = true;
+    Array.second->replaceAllUsesWith(resolveTypeRefArray(Array.first.get()));
+  }
+  OldTypeRefs.Arrays.clear();
+
+  // Replace old string-based type refs with the resolved node, if possible.
+  // If we haven't seen the node, leave it to the verifier to complain about
+  // the invalid string reference.
+  for (const auto &Ref : OldTypeRefs.Unknown) {
+    DidReplaceTypeRefs = true;
+    if (DICompositeType *CT = OldTypeRefs.Final.lookup(Ref.first))
+      Ref.second->replaceAllUsesWith(CT);
+    else
+      Ref.second->replaceAllUsesWith(Ref.first);
+  }
+  OldTypeRefs.Unknown.clear();
+
+  // Make sure all the upgraded types are resolved.
+  if (DidReplaceTypeRefs) {
+    AnyFwdRefs = true;
+    MinFwdRef = 0;
+    MaxFwdRef = MetadataPtrs.size() - 1;
+  }
+
+  if (!AnyFwdRefs)
+    // Nothing to do.
     return;
 
   // Resolve any cycles.
@@ -1139,6 +1209,60 @@ void BitcodeReaderMetadataList::tryToResolveCycles() {
 
   // Make sure we return early again until there's another forward ref.
   AnyFwdRefs = false;
+}
+
+void BitcodeReaderMetadataList::addTypeRef(MDString &UUID,
+                                           DICompositeType &CT) {
+  assert(CT.getRawIdentifier() == &UUID && "Mismatched UUID");
+  if (CT.isForwardDecl())
+    OldTypeRefs.FwdDecls.insert(std::make_pair(&UUID, &CT));
+  else
+    OldTypeRefs.Final.insert(std::make_pair(&UUID, &CT));
+}
+
+Metadata *BitcodeReaderMetadataList::upgradeTypeRef(Metadata *MaybeUUID) {
+  auto *UUID = dyn_cast_or_null<MDString>(MaybeUUID);
+  if (LLVM_LIKELY(!UUID))
+    return MaybeUUID;
+
+  if (auto *CT = OldTypeRefs.Final.lookup(UUID))
+    return CT;
+
+  auto &Ref = OldTypeRefs.Unknown[UUID];
+  if (!Ref)
+    Ref = MDNode::getTemporary(Context, None);
+  return Ref.get();
+}
+
+Metadata *BitcodeReaderMetadataList::upgradeTypeRefArray(Metadata *MaybeTuple) {
+  auto *Tuple = dyn_cast_or_null<MDTuple>(MaybeTuple);
+  if (!Tuple || Tuple->isDistinct())
+    return MaybeTuple;
+
+  // Look through the array immediately if possible.
+  if (!Tuple->isTemporary())
+    return resolveTypeRefArray(Tuple);
+
+  // Create and return a placeholder to use for now.  Eventually
+  // resolveTypeRefArrays() will be resolve this forward reference.
+  OldTypeRefs.Arrays.emplace_back();
+  OldTypeRefs.Arrays.back().first.reset(Tuple);
+  OldTypeRefs.Arrays.back().second = MDTuple::getTemporary(Context, None);
+  return OldTypeRefs.Arrays.back().second.get();
+}
+
+Metadata *BitcodeReaderMetadataList::resolveTypeRefArray(Metadata *MaybeTuple) {
+  auto *Tuple = dyn_cast_or_null<MDTuple>(MaybeTuple);
+  if (!Tuple || Tuple->isDistinct())
+    return MaybeTuple;
+
+  // Look through the DITypeRefArray, upgrading each DITypeRef.
+  SmallVector<Metadata *, 32> Ops;
+  Ops.reserve(Tuple->getNumOperands());
+  for (Metadata *MD : Tuple->operands())
+    Ops.push_back(upgradeTypeRef(MD));
+
+  return MDTuple::get(Context, Ops);
 }
 
 Type *BitcodeReader::getTypeByID(unsigned ID) {
@@ -2021,6 +2145,11 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
     return cast_or_null<MDString>(getMDOrNull(ID));
   };
 
+  // Support for old type refs.
+  auto getDITypeRefOrNull = [&](unsigned ID) {
+    return MetadataList.upgradeTypeRef(getMDOrNull(ID));
+  };
+
 #define GET_OR_DISTINCT(CLASS, ARGS)                                           \
   (IsDistinct ? CLASS::getDistinct ARGS : CLASS::get ARGS)
 
@@ -2231,12 +2360,12 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
 
       IsDistinct = Record[0];
       MetadataList.assignValue(
-          GET_OR_DISTINCT(DIDerivedType,
-                          (Context, Record[1], getMDString(Record[2]),
-                           getMDOrNull(Record[3]), Record[4],
-                           getMDOrNull(Record[5]), getMDOrNull(Record[6]),
-                           Record[7], Record[8], Record[9], Record[10],
-                           getMDOrNull(Record[11]))),
+          GET_OR_DISTINCT(
+              DIDerivedType,
+              (Context, Record[1], getMDString(Record[2]),
+               getMDOrNull(Record[3]), Record[4], getDITypeRefOrNull(Record[5]),
+               getDITypeRefOrNull(Record[6]), Record[7], Record[8], Record[9],
+               Record[10], getDITypeRefOrNull(Record[11]))),
           NextMetadataNo++);
       break;
     }
@@ -2246,20 +2375,21 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
 
       // If we have a UUID and this is not a forward declaration, lookup the
       // mapping.
-      IsDistinct = Record[0];
+      IsDistinct = Record[0] & 0x1;
+      bool IsNotUsedInTypeRef = Record[0] >= 2;
       unsigned Tag = Record[1];
       MDString *Name = getMDString(Record[2]);
       Metadata *File = getMDOrNull(Record[3]);
       unsigned Line = Record[4];
-      Metadata *Scope = getMDOrNull(Record[5]);
-      Metadata *BaseType = getMDOrNull(Record[6]);
+      Metadata *Scope = getDITypeRefOrNull(Record[5]);
+      Metadata *BaseType = getDITypeRefOrNull(Record[6]);
       uint64_t SizeInBits = Record[7];
       uint64_t AlignInBits = Record[8];
       uint64_t OffsetInBits = Record[9];
       unsigned Flags = Record[10];
       Metadata *Elements = getMDOrNull(Record[11]);
       unsigned RuntimeLang = Record[12];
-      Metadata *VTableHolder = getMDOrNull(Record[13]);
+      Metadata *VTableHolder = getDITypeRefOrNull(Record[13]);
       Metadata *TemplateParams = getMDOrNull(Record[14]);
       auto *Identifier = getMDString(Record[15]);
       DICompositeType *CT = nullptr;
@@ -2276,6 +2406,8 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
                               SizeInBits, AlignInBits, OffsetInBits, Flags,
                               Elements, RuntimeLang, VTableHolder,
                               TemplateParams, Identifier));
+      if (!IsNotUsedInTypeRef && Identifier)
+        MetadataList.addTypeRef(*Identifier, *cast<DICompositeType>(CT));
 
       MetadataList.assignValue(CT, NextMetadataNo++);
       break;
@@ -2284,10 +2416,14 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       if (Record.size() != 3)
         return error("Invalid record");
 
-      IsDistinct = Record[0];
+      IsDistinct = Record[0] & 0x1;
+      bool IsOldTypeRefArray = Record[0] < 2;
+      Metadata *Types = getMDOrNull(Record[2]);
+      if (LLVM_UNLIKELY(IsOldTypeRefArray))
+        Types = MetadataList.upgradeTypeRefArray(Types);
+
       MetadataList.assignValue(
-          GET_OR_DISTINCT(DISubroutineType,
-                          (Context, Record[1], getMDOrNull(Record[2]))),
+          GET_OR_DISTINCT(DISubroutineType, (Context, Record[1], Types)),
           NextMetadataNo++);
       break;
     }
@@ -2354,10 +2490,10 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       bool HasCU = Offset && !HasFn;
       DISubprogram *SP = GET_OR_DISTINCT(
           DISubprogram,
-          (Context, getMDOrNull(Record[1]), getMDString(Record[2]),
+          (Context, getDITypeRefOrNull(Record[1]), getMDString(Record[2]),
            getMDString(Record[3]), getMDOrNull(Record[4]), Record[5],
            getMDOrNull(Record[6]), Record[7], Record[8], Record[9],
-           getMDOrNull(Record[10]), Record[11], Record[12], Record[13],
+           getDITypeRefOrNull(Record[10]), Record[11], Record[12], Record[13],
            Record[14], HasCU ? CUorFn : nullptr,
            getMDOrNull(Record[15 + Offset]), getMDOrNull(Record[16 + Offset]),
            getMDOrNull(Record[17 + Offset])));
@@ -2444,7 +2580,7 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       IsDistinct = Record[0];
       MetadataList.assignValue(GET_OR_DISTINCT(DITemplateTypeParameter,
                                                (Context, getMDString(Record[1]),
-                                                getMDOrNull(Record[2]))),
+                                                getDITypeRefOrNull(Record[2]))),
                                NextMetadataNo++);
       break;
     }
@@ -2456,7 +2592,8 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       MetadataList.assignValue(
           GET_OR_DISTINCT(DITemplateValueParameter,
                           (Context, Record[1], getMDString(Record[2]),
-                           getMDOrNull(Record[3]), getMDOrNull(Record[4]))),
+                           getDITypeRefOrNull(Record[3]),
+                           getMDOrNull(Record[4]))),
           NextMetadataNo++);
       break;
     }
@@ -2470,7 +2607,7 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
                           (Context, getMDOrNull(Record[1]),
                            getMDString(Record[2]), getMDString(Record[3]),
                            getMDOrNull(Record[4]), Record[5],
-                           getMDOrNull(Record[6]), Record[7], Record[8],
+                           getDITypeRefOrNull(Record[6]), Record[7], Record[8],
                            getMDOrNull(Record[9]), getMDOrNull(Record[10]))),
           NextMetadataNo++);
       break;
@@ -2489,8 +2626,8 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
                           (Context, getMDOrNull(Record[1 + HasTag]),
                            getMDString(Record[2 + HasTag]),
                            getMDOrNull(Record[3 + HasTag]), Record[4 + HasTag],
-                           getMDOrNull(Record[5 + HasTag]), Record[6 + HasTag],
-                           Record[7 + HasTag])),
+                           getDITypeRefOrNull(Record[5 + HasTag]),
+                           Record[6 + HasTag], Record[7 + HasTag])),
           NextMetadataNo++);
       break;
     }
@@ -2515,7 +2652,7 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
                           (Context, getMDString(Record[1]),
                            getMDOrNull(Record[2]), Record[3],
                            getMDString(Record[4]), getMDString(Record[5]),
-                           Record[6], getMDOrNull(Record[7]))),
+                           Record[6], getDITypeRefOrNull(Record[7]))),
           NextMetadataNo++);
       break;
     }
@@ -2527,7 +2664,7 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       MetadataList.assignValue(
           GET_OR_DISTINCT(DIImportedEntity,
                           (Context, Record[1], getMDOrNull(Record[2]),
-                           getMDOrNull(Record[3]), Record[4],
+                           getDITypeRefOrNull(Record[3]), Record[4],
                            getMDString(Record[5]))),
           NextMetadataNo++);
       break;
@@ -5592,7 +5729,7 @@ void ModuleSummaryIndexBitcodeReader::freeState() { Buffer = nullptr; }
 
 void ModuleSummaryIndexBitcodeReader::releaseBuffer() { Buffer.release(); }
 
-GlobalValue::GUID
+std::pair<GlobalValue::GUID, GlobalValue::GUID>
 ModuleSummaryIndexBitcodeReader::getGUIDFromValueId(unsigned ValueId) {
   auto VGI = ValueIdToCallGraphGUIDMap.find(ValueId);
   assert(VGI != ValueIdToCallGraphGUIDMap.end());
@@ -5656,13 +5793,19 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseValueSymbolTable(
       auto VLI = ValueIdToLinkageMap.find(ValueID);
       assert(VLI != ValueIdToLinkageMap.end() &&
              "No linkage found for VST entry?");
-      std::string GlobalId = GlobalValue::getGlobalIdentifier(
-          ValueName, VLI->second, SourceFileName);
+      auto Linkage = VLI->second;
+      std::string GlobalId =
+          GlobalValue::getGlobalIdentifier(ValueName, Linkage, SourceFileName);
       auto ValueGUID = GlobalValue::getGUID(GlobalId);
+      auto OriginalNameID = ValueGUID;
+      if (GlobalValue::isLocalLinkage(Linkage))
+        OriginalNameID = GlobalValue::getGUID(ValueName);
       if (PrintSummaryGUIDs)
-        dbgs() << "GUID " << ValueGUID << " is " << ValueName << "\n";
+        dbgs() << "GUID " << ValueGUID << "(" << OriginalNameID << ") is "
+               << ValueName << "\n";
       TheIndex->addGlobalValueInfo(ValueGUID, std::move(GlobalValInfo));
-      ValueIdToCallGraphGUIDMap[ValueID] = ValueGUID;
+      ValueIdToCallGraphGUIDMap[ValueID] =
+          std::make_pair(ValueGUID, OriginalNameID);
       ValueName.clear();
       break;
     }
@@ -5678,13 +5821,19 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseValueSymbolTable(
       auto VLI = ValueIdToLinkageMap.find(ValueID);
       assert(VLI != ValueIdToLinkageMap.end() &&
              "No linkage found for VST entry?");
+      auto Linkage = VLI->second;
       std::string FunctionGlobalId = GlobalValue::getGlobalIdentifier(
           ValueName, VLI->second, SourceFileName);
       auto FunctionGUID = GlobalValue::getGUID(FunctionGlobalId);
+      auto OriginalNameID = FunctionGUID;
+      if (GlobalValue::isLocalLinkage(Linkage))
+        OriginalNameID = GlobalValue::getGUID(ValueName);
       if (PrintSummaryGUIDs)
-        dbgs() << "GUID " << FunctionGUID << " is " << ValueName << "\n";
+        dbgs() << "GUID " << FunctionGUID << "(" << OriginalNameID << ") is "
+               << ValueName << "\n";
       TheIndex->addGlobalValueInfo(FunctionGUID, std::move(FuncInfo));
-      ValueIdToCallGraphGUIDMap[ValueID] = FunctionGUID;
+      ValueIdToCallGraphGUIDMap[ValueID] =
+          std::make_pair(FunctionGUID, OriginalNameID);
 
       ValueName.clear();
       break;
@@ -5698,14 +5847,19 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseValueSymbolTable(
           llvm::make_unique<GlobalValueInfo>(GlobalValSummaryOffset);
       SummaryOffsetToInfoMap[GlobalValSummaryOffset] = GlobalValInfo.get();
       TheIndex->addGlobalValueInfo(GlobalValGUID, std::move(GlobalValInfo));
-      ValueIdToCallGraphGUIDMap[ValueID] = GlobalValGUID;
+      // The "original name", which is the second value of the pair will be
+      // overriden later by a FS_COMBINED_ORIGINAL_NAME in the combined index.
+      ValueIdToCallGraphGUIDMap[ValueID] =
+          std::make_pair(GlobalValGUID, GlobalValGUID);
       break;
     }
     case bitc::VST_CODE_COMBINED_ENTRY: {
       // VST_CODE_COMBINED_ENTRY: [valueid, refguid]
       unsigned ValueID = Record[0];
       GlobalValue::GUID RefGUID = Record[1];
-      ValueIdToCallGraphGUIDMap[ValueID] = RefGUID;
+      // The "original name", which is the second value of the pair will be
+      // overriden later by a FS_COMBINED_ORIGINAL_NAME in the combined index.
+      ValueIdToCallGraphGUIDMap[ValueID] = std::make_pair(RefGUID, RefGUID);
       break;
     }
     }
@@ -5867,9 +6021,24 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseModule() {
 std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
   if (Stream.EnterSubBlock(bitc::GLOBALVAL_SUMMARY_BLOCK_ID))
     return error("Invalid record");
-
   SmallVector<uint64_t, 64> Record;
 
+  // Parse version
+  {
+    BitstreamEntry Entry = Stream.advanceSkippingSubblocks();
+    if (Entry.Kind != BitstreamEntry::Record)
+      return error("Invalid Summary Block: record for version expected");
+    if (Stream.readRecord(Entry.ID, Record) != bitc::FS_VERSION)
+      return error("Invalid Summary Block: version expected");
+  }
+  const uint64_t Version = Record[0];
+  if (Version != 1)
+    return error("Invalid summary version " + Twine(Version) + ", 1 expected");
+  Record.clear();
+
+  // Keep around the last seen summary to be used when we see an optional
+  // "OriginalName" attachement.
+  GlobalValueSummary *LastSeenSummary = nullptr;
   bool Combined = false;
   while (1) {
     BitstreamEntry Entry = Stream.advanceSkippingSubblocks();
@@ -5908,19 +6077,20 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
     switch (BitCode) {
     default: // Default behavior: ignore.
       break;
-    // FS_PERMODULE: [valueid, linkage, instcount, numrefs, numrefs x valueid,
+    // FS_PERMODULE: [valueid, flags, instcount, numrefs, numrefs x valueid,
     //                n x (valueid, callsitecount)]
-    // FS_PERMODULE_PROFILE: [valueid, linkage, instcount, numrefs,
+    // FS_PERMODULE_PROFILE: [valueid, flags, instcount, numrefs,
     //                        numrefs x valueid,
     //                        n x (valueid, callsitecount, profilecount)]
     case bitc::FS_PERMODULE:
     case bitc::FS_PERMODULE_PROFILE: {
       unsigned ValueID = Record[0];
-      uint64_t RawLinkage = Record[1];
+      uint64_t RawFlags = Record[1];
       unsigned InstCount = Record[2];
       unsigned NumRefs = Record[3];
-      std::unique_ptr<FunctionSummary> FS = llvm::make_unique<FunctionSummary>(
-          getDecodedLinkage(RawLinkage), InstCount);
+      auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
+      std::unique_ptr<FunctionSummary> FS =
+          llvm::make_unique<FunctionSummary>(Flags, InstCount);
       // The module path string ref set in the summary must be owned by the
       // index's module string table. Since we don't have a module path
       // string table section in the per-module index, we create a single
@@ -5934,7 +6104,7 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
              "Record size inconsistent with number of references");
       for (unsigned I = 4, E = CallGraphEdgeStartIndex; I != E; ++I) {
         unsigned RefValueId = Record[I];
-        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId);
+        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId).first;
         FS->addRefEdge(RefGUID);
       }
       bool HasProfile = (BitCode == bitc::FS_PERMODULE_PROFILE);
@@ -5943,25 +6113,26 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
         unsigned CalleeValueId = Record[I];
         unsigned CallsiteCount = Record[++I];
         uint64_t ProfileCount = HasProfile ? Record[++I] : 0;
-        GlobalValue::GUID CalleeGUID = getGUIDFromValueId(CalleeValueId);
+        GlobalValue::GUID CalleeGUID = getGUIDFromValueId(CalleeValueId).first;
         FS->addCallGraphEdge(CalleeGUID,
                              CalleeInfo(CallsiteCount, ProfileCount));
       }
-      GlobalValue::GUID GUID = getGUIDFromValueId(ValueID);
-      auto *Info = TheIndex->getGlobalValueInfo(GUID);
+      auto GUID = getGUIDFromValueId(ValueID);
+      FS->setOriginalName(GUID.second);
+      auto *Info = TheIndex->getGlobalValueInfo(GUID.first);
       assert(!Info->summary() && "Expected a single summary per VST entry");
       Info->setSummary(std::move(FS));
       break;
     }
-    // FS_ALIAS: [valueid, linkage, valueid]
+    // FS_ALIAS: [valueid, flags, valueid]
     // Aliases must be emitted (and parsed) after all FS_PERMODULE entries, as
     // they expect all aliasee summaries to be available.
     case bitc::FS_ALIAS: {
       unsigned ValueID = Record[0];
-      uint64_t RawLinkage = Record[1];
+      uint64_t RawFlags = Record[1];
       unsigned AliaseeID = Record[2];
-      std::unique_ptr<AliasSummary> AS =
-          llvm::make_unique<AliasSummary>(getDecodedLinkage(RawLinkage));
+      auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
+      std::unique_ptr<AliasSummary> AS = llvm::make_unique<AliasSummary>(Flags);
       // The module path string ref set in the summary must be owned by the
       // index's module string table. Since we don't have a module path
       // string table section in the per-module index, we create a single
@@ -5970,50 +6141,55 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       AS->setModulePath(
           TheIndex->addModulePath(Buffer->getBufferIdentifier(), 0)->first());
 
-      GlobalValue::GUID AliaseeGUID = getGUIDFromValueId(AliaseeID);
+      GlobalValue::GUID AliaseeGUID = getGUIDFromValueId(AliaseeID).first;
       auto *AliaseeInfo = TheIndex->getGlobalValueInfo(AliaseeGUID);
       if (!AliaseeInfo->summary())
         return error("Alias expects aliasee summary to be parsed");
       AS->setAliasee(AliaseeInfo->summary());
 
-      GlobalValue::GUID GUID = getGUIDFromValueId(ValueID);
-      auto *Info = TheIndex->getGlobalValueInfo(GUID);
+      auto GUID = getGUIDFromValueId(ValueID);
+      AS->setOriginalName(GUID.second);
+      auto *Info = TheIndex->getGlobalValueInfo(GUID.first);
       assert(!Info->summary() && "Expected a single summary per VST entry");
       Info->setSummary(std::move(AS));
       break;
     }
-    // FS_PERMODULE_GLOBALVAR_INIT_REFS: [valueid, linkage, n x valueid]
+    // FS_PERMODULE_GLOBALVAR_INIT_REFS: [valueid, flags, n x valueid]
     case bitc::FS_PERMODULE_GLOBALVAR_INIT_REFS: {
       unsigned ValueID = Record[0];
-      uint64_t RawLinkage = Record[1];
+      uint64_t RawFlags = Record[1];
+      auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
       std::unique_ptr<GlobalVarSummary> FS =
-          llvm::make_unique<GlobalVarSummary>(getDecodedLinkage(RawLinkage));
+          llvm::make_unique<GlobalVarSummary>(Flags);
       FS->setModulePath(
           TheIndex->addModulePath(Buffer->getBufferIdentifier(), 0)->first());
       for (unsigned I = 2, E = Record.size(); I != E; ++I) {
         unsigned RefValueId = Record[I];
-        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId);
+        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId).first;
         FS->addRefEdge(RefGUID);
       }
-      GlobalValue::GUID GUID = getGUIDFromValueId(ValueID);
-      auto *Info = TheIndex->getGlobalValueInfo(GUID);
+      auto GUID = getGUIDFromValueId(ValueID);
+      FS->setOriginalName(GUID.second);
+      auto *Info = TheIndex->getGlobalValueInfo(GUID.first);
       assert(!Info->summary() && "Expected a single summary per VST entry");
       Info->setSummary(std::move(FS));
       break;
     }
-    // FS_COMBINED: [modid, linkage, instcount, numrefs, numrefs x valueid,
+    // FS_COMBINED: [modid, flags, instcount, numrefs, numrefs x valueid,
     //               n x (valueid, callsitecount)]
-    // FS_COMBINED_PROFILE: [modid, linkage, instcount, numrefs,
+    // FS_COMBINED_PROFILE: [modid, flags, instcount, numrefs,
     //                       numrefs x valueid,
     //                       n x (valueid, callsitecount, profilecount)]
     case bitc::FS_COMBINED:
     case bitc::FS_COMBINED_PROFILE: {
       uint64_t ModuleId = Record[0];
-      uint64_t RawLinkage = Record[1];
+      uint64_t RawFlags = Record[1];
       unsigned InstCount = Record[2];
       unsigned NumRefs = Record[3];
-      std::unique_ptr<FunctionSummary> FS = llvm::make_unique<FunctionSummary>(
-          getDecodedLinkage(RawLinkage), InstCount);
+      auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
+      std::unique_ptr<FunctionSummary> FS =
+          llvm::make_unique<FunctionSummary>(Flags, InstCount);
+      LastSeenSummary = FS.get();
       FS->setModulePath(ModuleIdMap[ModuleId]);
       static int RefListStartIndex = 4;
       int CallGraphEdgeStartIndex = RefListStartIndex + NumRefs;
@@ -6021,7 +6197,7 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
              "Record size inconsistent with number of references");
       for (unsigned I = 4, E = CallGraphEdgeStartIndex; I != E; ++I) {
         unsigned RefValueId = Record[I];
-        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId);
+        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId).first;
         FS->addRefEdge(RefGUID);
       }
       bool HasProfile = (BitCode == bitc::FS_COMBINED_PROFILE);
@@ -6030,7 +6206,7 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
         unsigned CalleeValueId = Record[I];
         unsigned CallsiteCount = Record[++I];
         uint64_t ProfileCount = HasProfile ? Record[++I] : 0;
-        GlobalValue::GUID CalleeGUID = getGUIDFromValueId(CalleeValueId);
+        GlobalValue::GUID CalleeGUID = getGUIDFromValueId(CalleeValueId).first;
         FS->addCallGraphEdge(CalleeGUID,
                              CalleeInfo(CallsiteCount, ProfileCount));
       }
@@ -6040,15 +6216,16 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       Combined = true;
       break;
     }
-    // FS_COMBINED_ALIAS: [modid, linkage, offset]
+    // FS_COMBINED_ALIAS: [modid, flags, offset]
     // Aliases must be emitted (and parsed) after all FS_COMBINED entries, as
     // they expect all aliasee summaries to be available.
     case bitc::FS_COMBINED_ALIAS: {
       uint64_t ModuleId = Record[0];
-      uint64_t RawLinkage = Record[1];
+      uint64_t RawFlags = Record[1];
       uint64_t AliaseeSummaryOffset = Record[2];
-      std::unique_ptr<AliasSummary> AS =
-          llvm::make_unique<AliasSummary>(getDecodedLinkage(RawLinkage));
+      auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
+      std::unique_ptr<AliasSummary> AS = llvm::make_unique<AliasSummary>(Flags);
+      LastSeenSummary = AS.get();
       AS->setModulePath(ModuleIdMap[ModuleId]);
 
       auto *AliaseeInfo = getInfoFromSummaryOffset(AliaseeSummaryOffset);
@@ -6062,16 +6239,18 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       Combined = true;
       break;
     }
-    // FS_COMBINED_GLOBALVAR_INIT_REFS: [modid, linkage, n x valueid]
+    // FS_COMBINED_GLOBALVAR_INIT_REFS: [modid, flags, n x valueid]
     case bitc::FS_COMBINED_GLOBALVAR_INIT_REFS: {
       uint64_t ModuleId = Record[0];
-      uint64_t RawLinkage = Record[1];
+      uint64_t RawFlags = Record[1];
+      auto Flags = getDecodedGVSummaryFlags(RawFlags, Version);
       std::unique_ptr<GlobalVarSummary> FS =
-          llvm::make_unique<GlobalVarSummary>(getDecodedLinkage(RawLinkage));
+          llvm::make_unique<GlobalVarSummary>(Flags);
+      LastSeenSummary = FS.get();
       FS->setModulePath(ModuleIdMap[ModuleId]);
       for (unsigned I = 2, E = Record.size(); I != E; ++I) {
         unsigned RefValueId = Record[I];
-        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId);
+        GlobalValue::GUID RefGUID = getGUIDFromValueId(RefValueId).first;
         FS->addRefEdge(RefGUID);
       }
       auto *Info = getInfoFromSummaryOffset(CurRecordBit);
@@ -6079,6 +6258,15 @@ std::error_code ModuleSummaryIndexBitcodeReader::parseEntireSummary() {
       Info->setSummary(std::move(FS));
       Combined = true;
       break;
+    }
+    // FS_COMBINED_ORIGINAL_NAME: [original_name]
+    case bitc::FS_COMBINED_ORIGINAL_NAME: {
+      uint64_t OriginalName = Record[0];
+      if (!LastSeenSummary)
+        return error("Name attachment that does not follow a combined record");
+      LastSeenSummary->setOriginalName(OriginalName);
+      // Reset the LastSeenSummary
+      LastSeenSummary = nullptr;
     }
     }
   }
