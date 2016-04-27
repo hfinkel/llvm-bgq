@@ -5823,7 +5823,7 @@ static SDNode *tryToFoldExtendOfConstant(SDNode *N, const TargetLowering &TLI,
       Elts.push_back(DAG.getConstant(C.zext(VTBits), DL, SVT));
   }
 
-  return DAG.getNode(ISD::BUILD_VECTOR, DL, VT, Elts).getNode();
+  return DAG.getBuildVector(VT, DL, Elts).getNode();
 }
 
 // ExtendUsesToFormExtLoad - Trying to extend uses of a load to enable this:
@@ -7178,7 +7178,7 @@ SDValue DAGCombiner::visitTRUNCATE(SDNode *N) {
       for (unsigned i = 0, e = BuildVecNumElts; i != e; i += TruncEltOffset)
         Opnds.push_back(BuildVect.getOperand(i));
 
-      return DAG.getNode(ISD::BUILD_VECTOR, SDLoc(N), VT, Opnds);
+      return DAG.getBuildVector(VT, SDLoc(N), Opnds);
     }
   }
 
@@ -7610,7 +7610,7 @@ ConstantFoldBITCASTofBUILD_VECTOR(SDNode *BV, EVT DstEltVT) {
                                 DstEltVT, Op));
       AddToWorklist(Ops.back().getNode());
     }
-    return DAG.getNode(ISD::BUILD_VECTOR, SDLoc(BV), VT, Ops);
+    return DAG.getBuildVector(VT, SDLoc(BV), Ops);
   }
 
   // Otherwise, we're growing or shrinking the elements.  To avoid having to
@@ -7666,7 +7666,7 @@ ConstantFoldBITCASTofBUILD_VECTOR(SDNode *BV, EVT DstEltVT) {
     }
 
     EVT VT = EVT::getVectorVT(*DAG.getContext(), DstEltVT, Ops.size());
-    return DAG.getNode(ISD::BUILD_VECTOR, DL, VT, Ops);
+    return DAG.getBuildVector(VT, DL, Ops);
   }
 
   // Finally, this must be the case where we are shrinking elements: each input
@@ -7696,7 +7696,7 @@ ConstantFoldBITCASTofBUILD_VECTOR(SDNode *BV, EVT DstEltVT) {
       std::reverse(Ops.end()-NumOutputsPerInput, Ops.end());
   }
 
-  return DAG.getNode(ISD::BUILD_VECTOR, DL, VT, Ops);
+  return DAG.getBuildVector(VT, DL, Ops);
 }
 
 /// Try to perform FMA combining on a given FADD node.
@@ -11186,7 +11186,7 @@ SDValue DAGCombiner::getMergedConstantVectorStore(SelectionDAG &DAG,
     BuildVector.push_back(St->getValue());
   }
 
-  return DAG.getNode(ISD::BUILD_VECTOR, SL, Ty, BuildVector);
+  return DAG.getBuildVector(Ty, SL, BuildVector);
 }
 
 bool DAGCombiner::MergeStoresOfConstantsOrVecElts(
@@ -12212,7 +12212,7 @@ SDValue DAGCombiner::visitINSERT_VECTOR_ELT(SDNode *N) {
   }
 
   // Return the new vector
-  return DAG.getNode(ISD::BUILD_VECTOR, dl, VT, Ops);
+  return DAG.getBuildVector(VT, dl, Ops);
 }
 
 SDValue DAGCombiner::ReplaceExtractVectorEltOfLoadWithNarrowedLoad(
@@ -12589,7 +12589,7 @@ SDValue DAGCombiner::reduceBuildVecExtToExtBuildVec(SDNode *N) {
   if (!isTypeLegal(VecVT)) return SDValue();
 
   // Make the new BUILD_VECTOR.
-  SDValue BV = DAG.getNode(ISD::BUILD_VECTOR, dl, VecVT, Ops);
+  SDValue BV = DAG.getBuildVector(VecVT, dl, Ops);
 
   // The new BUILD_VECTOR node has the potential to be further optimized.
   AddToWorklist(BV.getNode());
@@ -12662,7 +12662,7 @@ SDValue DAGCombiner::reduceBuildVecConvertToConvertBuildVec(SDNode *N) {
     else
       Opnds.push_back(In.getOperand(0));
   }
-  SDValue BV = DAG.getNode(ISD::BUILD_VECTOR, dl, NVT, Opnds);
+  SDValue BV = DAG.getBuildVector(NVT, dl, Opnds);
   AddToWorklist(BV.getNode());
 
   return DAG.getNode(Opcode, dl, VT, BV);
@@ -12901,7 +12901,7 @@ static SDValue combineConcatVectorOfScalars(SDNode *N, SelectionDAG &DAG) {
   EVT VecVT = EVT::getVectorVT(*DAG.getContext(), SVT,
                                VT.getSizeInBits() / SVT.getSizeInBits());
   return DAG.getNode(ISD::BITCAST, DL, VT,
-                     DAG.getNode(ISD::BUILD_VECTOR, DL, VecVT, Ops));
+                     DAG.getBuildVector(VecVT, DL, Ops));
 }
 
 // Check to see if this is a CONCAT_VECTORS of a bunch of EXTRACT_SUBVECTOR
@@ -13081,7 +13081,7 @@ SDValue DAGCombiner::visitCONCAT_VECTORS(SDNode *N) {
 
     assert(VT.getVectorNumElements() == Opnds.size() &&
            "Concat vector type mismatch");
-    return DAG.getNode(ISD::BUILD_VECTOR, SDLoc(N), VT, Opnds);
+    return DAG.getBuildVector(VT, SDLoc(N), Opnds);
   }
 
   // Fold CONCAT_VECTORS of only bitcast scalars (or undef) to BUILD_VECTOR.
@@ -13451,8 +13451,7 @@ SDValue DAGCombiner::visitVECTOR_SHUFFLE(SDNode *N) {
       // Canonicalize any other splat as a build_vector.
       const SDValue &Splatted = V->getOperand(SVN->getSplatIndex());
       SmallVector<SDValue, 8> Ops(NumElts, Splatted);
-      SDValue NewBV = DAG.getNode(ISD::BUILD_VECTOR, SDLoc(N),
-                                  V->getValueType(0), Ops);
+      SDValue NewBV = DAG.getBuildVector(V->getValueType(0), SDLoc(N), Ops);
 
       // We may have jumped through bitcasts, so the type of the
       // BUILD_VECTOR may not match the type of the shuffle.
@@ -13510,7 +13509,7 @@ SDValue DAGCombiner::visitVECTOR_SHUFFLE(SDNode *N) {
           Op = TLI.isZExtFree(Op.getValueType(), SVT)
                    ? DAG.getZExtOrTrunc(Op, SDLoc(N), SVT)
                    : DAG.getSExtOrTrunc(Op, SDLoc(N), SVT);
-      return DAG.getNode(ISD::BUILD_VECTOR, SDLoc(N), VT, Ops);
+      return DAG.getBuildVector(VT, SDLoc(N), Ops);
     }
   }
 
@@ -13748,26 +13747,30 @@ SDValue DAGCombiner::visitSCALAR_TO_VECTOR(SDNode *N) {
 
 SDValue DAGCombiner::visitINSERT_SUBVECTOR(SDNode *N) {
   SDValue N0 = N->getOperand(0);
+  SDValue N1 = N->getOperand(1);
   SDValue N2 = N->getOperand(2);
+
+  if (N0.getValueType() != N1.getValueType())
+    return SDValue();
 
   // If the input vector is a concatenation, and the insert replaces
   // one of the halves, we can optimize into a single concat_vectors.
-  if (N0.getOpcode() == ISD::CONCAT_VECTORS &&
-      N0->getNumOperands() == 2 && N2.getOpcode() == ISD::Constant) {
+  if (N0.getOpcode() == ISD::CONCAT_VECTORS && N0->getNumOperands() == 2 &&
+      N2.getOpcode() == ISD::Constant) {
     APInt InsIdx = cast<ConstantSDNode>(N2)->getAPIntValue();
     EVT VT = N->getValueType(0);
 
     // Lower half: fold (insert_subvector (concat_vectors X, Y), Z) ->
     // (concat_vectors Z, Y)
     if (InsIdx == 0)
-      return DAG.getNode(ISD::CONCAT_VECTORS, SDLoc(N), VT,
-                         N->getOperand(1), N0.getOperand(1));
+      return DAG.getNode(ISD::CONCAT_VECTORS, SDLoc(N), VT, N1,
+                         N0.getOperand(1));
 
     // Upper half: fold (insert_subvector (concat_vectors X, Y), Z) ->
     // (concat_vectors X, Z)
-    if (InsIdx == VT.getVectorNumElements()/2)
-      return DAG.getNode(ISD::CONCAT_VECTORS, SDLoc(N), VT,
-                         N0.getOperand(0), N->getOperand(1));
+    if (InsIdx == VT.getVectorNumElements() / 2)
+      return DAG.getNode(ISD::CONCAT_VECTORS, SDLoc(N), VT, N0.getOperand(0),
+                         N1);
   }
 
   return SDValue();

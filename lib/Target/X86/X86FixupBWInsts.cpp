@@ -138,7 +138,7 @@ char FixupBWInstPass::ID = 0;
 FunctionPass *llvm::createX86FixupBWInsts() { return new FixupBWInstPass(); }
 
 bool FixupBWInstPass::runOnMachineFunction(MachineFunction &MF) {
-  if (!FixupBWInsts)
+  if (!FixupBWInsts || skipFunction(*MF.getFunction()))
     return false;
 
   this->MF = &MF;
@@ -244,7 +244,8 @@ void FixupBWInstPass::processBasicBlock(MachineFunction &MF,
   // Start computing liveness for this block. We iterate from the end to be able
   // to update this for each instruction.
   LiveRegs.clear();
-  LiveRegs.addLiveOuts(&MBB);
+  // We run after PEI, so we need to AddPristinesAndCSRs.
+  LiveRegs.addLiveOuts(&MBB, /*AddPristinesAndCSRs=*/true);
 
   for (auto I = MBB.rbegin(); I != MBB.rend(); ++I) {
     MachineInstr *NewMI = nullptr;

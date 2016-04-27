@@ -20,6 +20,8 @@ namespace llvm {
 class MemoryBuffer;
 
 struct PDBFileContext;
+class PDBDbiStream;
+class PDBInfoStream;
 
 class PDBFile {
 public:
@@ -54,8 +56,13 @@ public:
     return BlockNumber * BlockSize;
   }
 
+  PDBInfoStream &getPDBInfoStream();
+  PDBDbiStream &getPDBDbiStream();
+
 private:
   std::unique_ptr<PDBFileContext> Context;
+  std::unique_ptr<PDBInfoStream> InfoStream;
+  std::unique_ptr<PDBDbiStream> DbiStream;
 };
 }
 

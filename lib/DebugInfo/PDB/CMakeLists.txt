@@ -28,6 +28,9 @@ endif()
 
 add_pdb_impl_folder(Raw
   Raw/PDBFile.cpp
+  Raw/PDBDbiStream.cpp
+  Raw/PDBInfoStream.cpp
+  Raw/PDBNameMap.cpp
   Raw/PDBStream.cpp
   Raw/RawSession.cpp)
 
