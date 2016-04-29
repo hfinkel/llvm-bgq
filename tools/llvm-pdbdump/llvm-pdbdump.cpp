@@ -281,42 +281,34 @@ static void dumpStructure(RawSession &RS) {
          << Minor << "." << DbiStream.getPdbDllVersion() << '\n';
 
   outs() << "Modules: \n";
-  for (auto Modi : DbiStream.modules()) {
-    outs() << Modi.getModuleName() << '\n';
-    outs().indent(4) << "Debug Stream Index: " << Modi.getModuleStreamIndex()
-                     << '\n';
-    outs().indent(4) << "Object File: " << Modi.getObjFileName() << '\n';
-    outs().indent(4) << "Num Files: " << Modi.getNumberOfFiles() << '\n';
+  for (auto &Modi : DbiStream.modules()) {
+    outs() << Modi.Info.getModuleName() << '\n';
+    outs().indent(4) << "Debug Stream Index: "
+                     << Modi.Info.getModuleStreamIndex() << '\n';
+    outs().indent(4) << "Object File: " << Modi.Info.getObjFileName() << '\n';
+    outs().indent(4) << "Num Files: " << Modi.Info.getNumberOfFiles() << '\n';
     outs().indent(4) << "Source File Name Idx: "
-                     << Modi.getSourceFileNameIndex() << '\n';
-    outs().indent(4) << "Pdb File Name Idx: " << Modi.getPdbFilePathNameIndex()
-                     << '\n';
-    outs().indent(4) << "Line Info Byte Size: " << Modi.getLineInfoByteSize()
-                     << '\n';
+                     << Modi.Info.getSourceFileNameIndex() << '\n';
+    outs().indent(4) << "Pdb File Name Idx: "
+                     << Modi.Info.getPdbFilePathNameIndex() << '\n';
+    outs().indent(4) << "Line Info Byte Size: "
+                     << Modi.Info.getLineInfoByteSize() << '\n';
     outs().indent(4) << "C13 Line Info Byte Size: "
-                     << Modi.getC13LineInfoByteSize() << '\n';
+                     << Modi.Info.getC13LineInfoByteSize() << '\n';
     outs().indent(4) << "Symbol Byte Size: "
-                     << Modi.getSymbolDebugInfoByteSize() << '\n';
-    outs().indent(4) << "Type Server Index: " << Modi.getTypeServerIndex()
+                     << Modi.Info.getSymbolDebugInfoByteSize() << '\n';
+    outs().indent(4) << "Type Server Index: " << Modi.Info.getTypeServerIndex()
                      << '\n';
-    outs().indent(4) << "Has EC Info: " << Modi.hasECInfo() << '\n';
+    outs().indent(4) << "Has EC Info: " << Modi.Info.hasECInfo() << '\n';
+    outs().indent(4) << Modi.SourceFiles.size()
+                     << " Contributing Source Files: \n";
+    for (auto File : Modi.SourceFiles) {
+      outs().indent(8) << File << '\n';
+    }
   }
 }
 
-static void dumpInput(StringRef Path) {
-  std::unique_ptr<IPDBSession> Session;
-  if (opts::DumpHeaders || !opts::DumpStreamData.empty()) {
-    PDB_ErrorCode Error = loadDataForPDB(PDB_ReaderType::Raw, Path, Session);
-    if (Error == PDB_ErrorCode::Success) {
-      RawSession *RS = static_cast<RawSession *>(Session.get());
-      dumpStructure(*RS);
-    }
-
-    outs().flush();
-    return;
-  }
-
-  PDB_ErrorCode Error = loadDataForPDB(PDB_ReaderType::DIA, Path, Session);
+static void reportError(StringRef Path, PDB_ErrorCode Error) {
   switch (Error) {
   case PDB_ErrorCode::Success:
     break;
@@ -342,6 +334,28 @@ static void dumpInput(StringRef Path) {
            << "'.  An unknown error occured.\n";
     return;
   }
+}
+
+static void dumpInput(StringRef Path) {
+  std::unique_ptr<IPDBSession> Session;
+  if (opts::DumpHeaders || !opts::DumpStreamData.empty()) {
+    PDB_ErrorCode Error = loadDataForPDB(PDB_ReaderType::Raw, Path, Session);
+    if (Error == PDB_ErrorCode::Success) {
+      RawSession *RS = static_cast<RawSession *>(Session.get());
+      dumpStructure(*RS);
+    }
+
+    reportError(Path, Error);
+    outs().flush();
+    return;
+  }
+
+  PDB_ErrorCode Error = loadDataForPDB(PDB_ReaderType::DIA, Path, Session);
+  if (Error != PDB_ErrorCode::Success) {
+    reportError(Path, Error);
+    return;
+  }
+
   if (opts::LoadAddress)
     Session->setLoadAddress(opts::LoadAddress);
 
