@@ -12,23 +12,22 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#include "llvm-readobj.h"
 #include "ARMWinEHPrinter.h"
 #include "CodeView.h"
 #include "Error.h"
 #include "ObjDumper.h"
 #include "StackMapPrinter.h"
-#include "StreamWriter.h"
 #include "Win64EHDumper.h"
+#include "llvm-readobj.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/DebugInfo/CodeView/CodeView.h"
 #include "llvm/DebugInfo/CodeView/Line.h"
+#include "llvm/DebugInfo/CodeView/SymbolRecord.h"
 #include "llvm/DebugInfo/CodeView/TypeIndex.h"
 #include "llvm/DebugInfo/CodeView/TypeRecord.h"
-#include "llvm/DebugInfo/CodeView/SymbolRecord.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/COFF.h"
@@ -36,6 +35,7 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/DataExtractor.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/Win64EH.h"
 #include "llvm/Support/raw_ostream.h"
@@ -52,12 +52,33 @@ using namespace llvm::Win64EH;
 
 namespace {
 
+class CVTypeDumper {
+public:
+  CVTypeDumper(ScopedPrinter &W) : W(W) {}
+
+  StringRef getTypeName(TypeIndex TI);
+  void printTypeIndex(StringRef FieldName, TypeIndex TI);
+
+  void dump(StringRef Data);
+
+private:
+  void printCodeViewFieldList(StringRef FieldData);
+  void printMemberAttributes(MemberAttributes Attrs);
+
+  ScopedPrinter &W;
+
+  /// All user defined type records in .debug$T live in here. Type indices
+  /// greater than 0x1000 are user defined. Subtract 0x1000 from the index to
+  /// index into this vector.
+  SmallVector<StringRef, 10> CVUDTNames;
+
+  StringSet<> TypeNames;
+};
+
 class COFFDumper : public ObjDumper {
 public:
-  COFFDumper(const llvm::object::COFFObjectFile *Obj, StreamWriter& Writer)
-    : ObjDumper(Writer)
-    , Obj(Obj) {
-  }
+  COFFDumper(const llvm::object::COFFObjectFile *Obj, ScopedPrinter &Writer)
+      : ObjDumper(Writer), Obj(Obj), CVTD(Writer) {}
 
   void printFileHeaders() override;
   void printSections() override;
@@ -84,11 +105,13 @@ private:
 
   void printCodeViewSymbolSection(StringRef SectionName, const SectionRef &Section);
   void printCodeViewTypeSection(StringRef SectionName, const SectionRef &Section);
-  void printCodeViewFieldList(StringRef FieldData);
   StringRef getTypeName(TypeIndex Ty);
   StringRef getFileNameForFileOffset(uint32_t FileOffset);
   void printFileNameForOffset(StringRef Label, uint32_t FileOffset);
-  void printTypeIndex(StringRef FieldName, TypeIndex TI);
+  void printTypeIndex(StringRef FieldName, TypeIndex TI) {
+    // Forward to CVTypeDumper for simplicity.
+    CVTD.printTypeIndex(FieldName, TI);
+  }
   void printLocalVariableAddrRange(const LocalVariableAddrRange &Range,
                                    const coff_section *Sec,
                                    StringRef SectionContents);
@@ -101,8 +124,6 @@ private:
   void printCodeViewFileChecksums(StringRef Subsection);
 
   void printCodeViewInlineeLines(StringRef Subsection);
-
-  void printMemberAttributes(MemberAttributes Attrs);
 
   void printRelocatedField(StringRef Label, const coff_section *Sec,
                            StringRef SectionContents, const ulittle32_t *Field,
@@ -136,12 +157,7 @@ private:
   StringRef CVFileChecksumTable;
   StringRef CVStringTable;
 
-  /// All user defined type records in .debug$T live in here. Type indices
-  /// greater than 0x1000 are user defined. Subtract 0x1000 from the index to
-  /// index into this vector.
-  SmallVector<StringRef, 10> CVUDTNames;
-
-  StringSet<> TypeNames;
+  CVTypeDumper CVTD;
 };
 
 } // namespace
@@ -150,7 +166,7 @@ private:
 namespace llvm {
 
 std::error_code createCOFFDumper(const object::ObjectFile *Obj,
-                                 StreamWriter &Writer,
+                                 ScopedPrinter &Writer,
                                  std::unique_ptr<ObjDumper> &Result) {
   const COFFObjectFile *COFFObj = dyn_cast<COFFObjectFile>(Obj);
   if (!COFFObj)
@@ -1850,23 +1866,13 @@ void COFFDumper::printCodeViewInlineeLines(StringRef Subsection) {
   }
 }
 
-StringRef getRemainingTypeBytes(const TypeRecordPrefix *Rec, const char *Start) {
-  ptrdiff_t StartOffset = Start - reinterpret_cast<const char *>(Rec);
-  size_t RecSize = Rec->Len + 2;
-  assert(StartOffset >= 0 && "negative start-offset!");
-  assert(static_cast<size_t>(StartOffset) <= RecSize &&
-         "Start beyond the end of Rec");
-  return StringRef(Start, RecSize - StartOffset);
-}
-
-StringRef getRemainingBytesAsString(const TypeRecordPrefix *Rec, const char *Start) {
-  StringRef Remaining = getRemainingTypeBytes(Rec, Start);
-  StringRef Leading, Trailing;
-  std::tie(Leading, Trailing) = Remaining.split('\0');
+StringRef getLeafDataBytesAsString(StringRef LeafData) {
+  StringRef Leading;
+  std::tie(Leading, std::ignore) = LeafData.split('\0');
   return Leading;
 }
 
-StringRef COFFDumper::getTypeName(TypeIndex TI) {
+StringRef CVTypeDumper::getTypeName(TypeIndex TI) {
   if (TI.isNoType())
     return "<no type>";
 
@@ -1893,7 +1899,7 @@ StringRef COFFDumper::getTypeName(TypeIndex TI) {
   return "<unknown UDT>";
 }
 
-void COFFDumper::printTypeIndex(StringRef FieldName, TypeIndex TI) {
+void CVTypeDumper::printTypeIndex(StringRef FieldName, TypeIndex TI) {
   StringRef TypeName;
   if (!TI.isNoType())
     TypeName = getTypeName(TI);
@@ -1949,69 +1955,157 @@ void COFFDumper::printFileNameForOffset(StringRef Label, uint32_t FileOffset) {
 
 static StringRef getLeafTypeName(TypeLeafKind LT) {
   switch (LT) {
-  case LF_STRING_ID: return "StringId";
-  case LF_FIELDLIST: return "FieldList";
-  case LF_ARGLIST:
-  case LF_SUBSTR_LIST: return "ArgList";
-  case LF_CLASS:
-  case LF_STRUCTURE:
-  case LF_INTERFACE: return "ClassType";
-  case LF_UNION: return "UnionType";
-  case LF_ENUM: return "EnumType";
-  case LF_ARRAY: return "ArrayType";
-  case LF_VFTABLE: return "VFTableType";
-  case LF_MFUNC_ID: return "MemberFuncId";
-  case LF_PROCEDURE: return "ProcedureType";
-  case LF_MFUNCTION: return "MemberFunctionType";
-  case LF_METHODLIST: return "MethodListEntry";
-  case LF_FUNC_ID: return "FuncId";
-  case LF_TYPESERVER2: return "TypeServer2";
-  case LF_POINTER: return "PointerType";
-  case LF_MODIFIER: return "TypeModifier";
-  case LF_VTSHAPE: return "VTableShape";
-  case LF_UDT_SRC_LINE: return "UDTSrcLine";
-  case LF_BUILDINFO: return "BuildInfo";
-  default: break;
+#define KNOWN_TYPE(LeafName, Value, ClassName) \
+  case LeafName: return #ClassName;
+#include "llvm/DebugInfo/CodeView/CVLeafTypes.def"
+  default:
+    break;
   }
   return "UnknownLeaf";
+}
+
+// A const input iterator interface to the CodeView type stream.
+class CodeViewTypeIterator {
+public:
+  struct TypeRecord {
+    std::size_t Length;
+    TypeLeafKind Leaf;
+    StringRef LeafData;
+  };
+
+  explicit CodeViewTypeIterator(const StringRef &SectionData)
+      : Data(SectionData), AtEnd(false) {
+    if (Data.size() >= 4) {
+      Magic = *reinterpret_cast<const ulittle32_t *>(Data.data());
+      Data = Data.drop_front(4);
+    }
+    next(); // Prime the pump
+  }
+
+  CodeViewTypeIterator() : AtEnd(true) {}
+
+  // For iterators to compare equal, they must both point at the same record
+  // in the same data stream, or they must both be at the end of a stream.
+  friend bool operator==(const CodeViewTypeIterator &lhs,
+                         const CodeViewTypeIterator &rhs);
+
+  friend bool operator!=(const CodeViewTypeIterator &lhs,
+                         const CodeViewTypeIterator &rhs);
+
+  unsigned getMagic() const { return Magic; }
+
+  const TypeRecord &operator*() const {
+    assert(!AtEnd);
+    return Current;
+  }
+
+  const TypeRecord *operator->() const {
+    assert(!AtEnd);
+    return &Current;
+  }
+
+  CodeViewTypeIterator operator++() {
+    next();
+    return *this;
+  }
+
+  CodeViewTypeIterator operator++(int) {
+    CodeViewTypeIterator Original = *this;
+    ++*this;
+    return Original;
+  }
+
+private:
+  void next() {
+    assert(!AtEnd && "Attempted to advance more than one past the last rec");
+    if (Data.empty()) {
+      // We've advanced past the last record.
+      AtEnd = true;
+      return;
+    }
+
+    const TypeRecordPrefix *Rec;
+    if (consumeObject(Data, Rec))
+      return;
+    Current.Length = Rec->Len;
+    Current.Leaf = static_cast<TypeLeafKind>(uint16_t(Rec->Leaf));
+    Current.LeafData = Data.substr(0, Current.Length - 2);
+
+    // The next record starts immediately after this one.
+    Data = Data.drop_front(Current.LeafData.size());
+
+    // FIXME: The stream contains LF_PAD bytes that we need to ignore, but those
+    // are typically included in LeafData. We may need to call skipPadding() if
+    // we ever find a record that doesn't count those bytes.
+
+    return;
+  }
+
+  StringRef Data;
+  unsigned Magic = 0;
+  TypeRecord Current;
+  bool AtEnd;
+};
+
+bool operator==(const CodeViewTypeIterator &lhs,
+                const CodeViewTypeIterator &rhs) {
+  return (lhs.Data.begin() == rhs.Data.begin()) || (lhs.AtEnd && rhs.AtEnd);
+}
+
+bool operator!=(const CodeViewTypeIterator &lhs,
+                const CodeViewTypeIterator &rhs) {
+  return !(lhs == rhs);
+}
+
+struct CodeViewTypeStream {
+  CodeViewTypeIterator begin;
+  CodeViewTypeIterator end;
+  unsigned Magic;
+};
+
+CodeViewTypeStream CreateCodeViewTypeIter(const StringRef &Data) {
+  CodeViewTypeStream Stream;
+  Stream.begin = CodeViewTypeIterator(Data);
+  Stream.end   = CodeViewTypeIterator();
+  Stream.Magic = Stream.begin.getMagic();
+
+  return Stream;
 }
 
 void COFFDumper::printCodeViewTypeSection(StringRef SectionName,
                                           const SectionRef &Section) {
   ListScope D(W, "CodeViewTypes");
   W.printNumber("Section", SectionName, Obj->getSectionID(Section));
+
   StringRef Data;
   error(Section.getContents(Data));
-  W.printBinaryBlock("Data", Data);
+  if (opts::CodeViewSubsectionBytes)
+    W.printBinaryBlock("Data", Data);
 
-  unsigned Magic = *reinterpret_cast<const ulittle32_t *>(Data.data());
-  W.printHex("Magic", Magic);
+  CVTD.dump(Data);
+}
 
-  Data = Data.drop_front(4);
+void CVTypeDumper::dump(StringRef Data) {
+  CodeViewTypeStream Stream = CreateCodeViewTypeIter(Data);
+  W.printHex("Magic", Stream.Magic);
 
-  while (!Data.empty()) {
-    const TypeRecordPrefix *Rec;
-    error(consumeObject(Data, Rec));
-    auto Leaf = static_cast<TypeLeafKind>(uint16_t(Rec->Leaf));
-
-    // This record is 'Len - 2' bytes, and the next one starts immediately
-    // afterwards.
-    StringRef LeafData = Data.substr(0, Rec->Len - 2);
-    StringRef RemainingData = Data.drop_front(LeafData.size());
+  for (auto Iter = Stream.begin; Iter != Stream.end; ++Iter) {
+    StringRef LeafData = Iter->LeafData;
 
     // Find the name of this leaf type.
-    StringRef LeafName = getLeafTypeName(Leaf);
+    StringRef LeafName = getLeafTypeName(Iter->Leaf);
     DictScope S(W, LeafName);
     unsigned NextTypeIndex = 0x1000 + CVUDTNames.size();
-    W.printEnum("TypeLeafKind", unsigned(Leaf), makeArrayRef(LeafTypeNames));
+    W.printEnum("TypeLeafKind", unsigned(Iter->Leaf),
+                makeArrayRef(LeafTypeNames));
     W.printHex("TypeIndex", NextTypeIndex);
 
     // Fill this in inside the switch to get something in CVUDTNames.
     StringRef Name;
 
-    switch (Leaf) {
+    switch (Iter->Leaf) {
     default: {
-      W.printHex("Size", Rec->Len);
+      W.printHex("Size", Iter->Length);
       break;
     }
 
@@ -2019,7 +2113,7 @@ void COFFDumper::printCodeViewTypeSection(StringRef SectionName,
       const StringId *String;
       error(consumeObject(LeafData, String));
       W.printHex("Id", String->id.getIndex());
-      StringRef StringData = getRemainingBytesAsString(Rec, LeafData.data());
+      StringRef StringData = getLeafDataBytesAsString(LeafData);
       W.printString("StringData", StringData);
       // Put this in CVUDTNames so it gets printed with LF_UDT_SRC_LINE.
       Name = StringData;
@@ -2027,7 +2121,7 @@ void COFFDumper::printCodeViewTypeSection(StringRef SectionName,
     }
 
     case LF_FIELDLIST: {
-      W.printHex("Size", Rec->Len);
+      W.printHex("Size", Iter->Length);
       // FieldList has no fixed prefix that can be described with a struct. All
       // the bytes must be interpreted as more records.
       printCodeViewFieldList(LeafData);
@@ -2073,7 +2167,7 @@ void COFFDumper::printCodeViewTypeSection(StringRef SectionName,
       std::tie(Name, LinkageName) = LeafData.split('\0');
       W.printString("Name", Name);
       if (Props & uint16_t(ClassOptions::HasUniqueName)) {
-        LinkageName = getRemainingBytesAsString(Rec, LinkageName.data());
+        LinkageName = getLeafDataBytesAsString(LinkageName);
         if (LinkageName.empty())
           return error(object_error::parse_failed);
         W.printString("LinkageName", LinkageName);
@@ -2095,7 +2189,7 @@ void COFFDumper::printCodeViewTypeSection(StringRef SectionName,
       std::tie(Name, LinkageName) = LeafData.split('\0');
       W.printString("Name", Name);
       if (Props & uint16_t(ClassOptions::HasUniqueName)) {
-        LinkageName = getRemainingBytesAsString(Rec, LinkageName.data());
+        LinkageName = getLeafDataBytesAsString(LinkageName);
         if (LinkageName.empty())
           return error(object_error::parse_failed);
         W.printString("LinkageName", LinkageName);
@@ -2350,11 +2444,6 @@ void COFFDumper::printCodeViewTypeSection(StringRef SectionName,
       W.printBinaryBlock("LeafData", LeafData);
 
     CVUDTNames.push_back(Name);
-
-    Data = RemainingData;
-    // FIXME: The stream contains LF_PAD bytes that we need to ignore, but those
-    // are typically included in LeafData. We may need to call skipPadding() if
-    // we ever find a record that doesn't count those bytes.
   }
 }
 
@@ -2369,7 +2458,7 @@ static StringRef skipPadding(StringRef Data) {
   return Data.drop_front(Leaf & 0x0F);
 }
 
-void COFFDumper::printMemberAttributes(MemberAttributes Attrs) {
+void CVTypeDumper::printMemberAttributes(MemberAttributes Attrs) {
   W.printEnum("AccessSpecifier", uint8_t(Attrs.getAccess()),
               makeArrayRef(MemberAccessNames));
   auto MK = Attrs.getMethodKind();
@@ -2382,7 +2471,7 @@ void COFFDumper::printMemberAttributes(MemberAttributes Attrs) {
   }
 }
 
-void COFFDumper::printCodeViewFieldList(StringRef FieldData) {
+void CVTypeDumper::printCodeViewFieldList(StringRef FieldData) {
   while (!FieldData.empty()) {
     const ulittle16_t *LeafPtr;
     error(consumeObject(FieldData, LeafPtr));

@@ -39,9 +39,11 @@
 #include "llvm/DebugInfo/PDB/Raw/InfoStream.h"
 #include "llvm/DebugInfo/PDB/Raw/MappedBlockStream.h"
 #include "llvm/DebugInfo/PDB/Raw/ModInfo.h"
+#include "llvm/DebugInfo/PDB/Raw/NameHashTable.h"
 #include "llvm/DebugInfo/PDB/Raw/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Raw/RawSession.h"
 #include "llvm/DebugInfo/PDB/Raw/StreamReader.h"
+#include "llvm/DebugInfo/PDB/Raw/TpiStream.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/FileSystem.h"
@@ -147,17 +149,27 @@ cl::opt<bool> NoEnumDefs("no-enum-definitions",
                          cl::cat(FilterCategory));
 }
 
+static void dumpBytes(raw_ostream &S, ArrayRef<uint8_t> Bytes,
+                      uint32_t BytesPerRow, uint32_t Indent) {
+  S << "[";
+  uint32_t I = 0;
 
-static void reportError(StringRef Input, StringRef Message) {
-  if (Input == "-")
-    Input = "<stdin>";
-  errs() << Input << ": " << Message << "\n";
-  errs().flush();
-  exit(1);
-}
-
-static void reportError(StringRef Input, std::error_code EC) {
-  reportError(Input, EC.message());
+  uint32_t BytesRemaining = Bytes.size();
+  while (BytesRemaining > 0) {
+    uint32_t BytesThisLine = std::min(BytesRemaining, BytesPerRow);
+    for (size_t L = 0; L < BytesThisLine; ++L, ++I) {
+      S << format_hex_no_prefix(Bytes[I], 2, true);
+      if (L + 1 < BytesThisLine)
+        S << ' ';
+    }
+    BytesRemaining -= BytesThisLine;
+    if (BytesRemaining > 0) {
+      S << '\n';
+      S.indent(Indent);
+    }
+  }
+  S << ']';
+  S.flush();
 }
 
 static void dumpStructure(RawSession &RS) {
@@ -253,19 +265,15 @@ static void dumpStructure(RawSession &RS) {
 
     outs() << "NameStream: " << NameStreamIndex << '\n';
 
-    // The name stream appears to start with a signature and version.
-    uint32_t NameStreamSignature;
-    Reader.readInteger(NameStreamSignature);
+    NameHashTable NameTable;
+    NameTable.load(Reader);
     outs() << "NameStreamSignature: ";
-    outs().write_hex(NameStreamSignature) << '\n';
-
-    uint32_t NameStreamVersion;
-    Reader.readInteger(NameStreamVersion);
-    outs() << "NameStreamVersion: " << NameStreamVersion << '\n';
-
-    // We only support this particular version of the name stream.
-    if (NameStreamSignature != 0xeffeeffe || NameStreamVersion != 1)
-      reportError("", std::make_error_code(std::errc::not_supported));
+    outs().write_hex(NameTable.getSignature()) << '\n';
+    outs() << "NameStreamVersion: " << NameTable.getHashVersion() << '\n';
+    outs() << "Name Count: " << NameTable.getNameCount() << '\n';
+    for (uint32_t ID : NameTable.name_ids()) {
+      outs() << "Name: " << NameTable.getStringForID(ID) << '\n';
+    }
   }
 
   DbiStream &DS = File.getPDBDbiStream();
@@ -308,6 +316,16 @@ static void dumpStructure(RawSession &RS) {
     for (auto File : Modi.SourceFiles) {
       outs().indent(8) << File << '\n';
     }
+  }
+
+  TpiStream &Tpi = File.getPDBTpiStream();
+  outs() << "TPI Version: " << Tpi.getTpiVersion() << '\n';
+  outs() << "Record count: " << Tpi.NumTypeRecords() << '\n';
+  for (auto &Record : Tpi.records()) {
+    outs().indent(2) << "Kind: 0x" << Record.Kind;
+    outs().indent(2) << "Bytes: ";
+    dumpBytes(outs(), Record.Record, 16, 24);
+    outs() << '\n';
   }
 }
 

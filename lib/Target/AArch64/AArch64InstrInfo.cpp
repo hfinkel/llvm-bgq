@@ -2724,9 +2724,10 @@ void AArch64InstrInfo::getNoopForMachoTarget(MCInst &NopInst) const {
   NopInst.setOpcode(AArch64::HINT);
   NopInst.addOperand(MCOperand::createImm(0));
 }
-/// useMachineCombiner - return true when a target supports MachineCombiner
+
+// AArch64 supports MachineCombiner.
 bool AArch64InstrInfo::useMachineCombiner() const {
-  // AArch64 supports the combiner
+
   return true;
 }
 //
@@ -3887,6 +3888,8 @@ bool AArch64InstrInfo::optimizeCondBranch(MachineInstr *MI) const {
                               .addReg(NewReg)
                               .addImm(Imm)
                               .addMBB(TBB);
+    // Register lives on to the CBZ now.
+    MO.setIsKill(false);
 
     // For immediate smaller than 32, we need to use the 32-bit
     // variant (W) in all cases. Indeed the 64-bit variant does not

@@ -58,4 +58,18 @@ std::error_code ByteStream::readBytes(uint32_t Offset,
   return std::error_code();
 }
 
+std::error_code ByteStream::getArrayRef(uint32_t Offset,
+                                        ArrayRef<uint8_t> &Buffer,
+                                        uint32_t Length) const {
+  if (Data.size() < Length + Offset)
+    return std::make_error_code(std::errc::bad_address);
+  Buffer = Data.slice(Offset, Length);
+  return std::error_code();
+}
+
 uint32_t ByteStream::getLength() const { return Data.size(); }
+
+StringRef ByteStream::str() const {
+  const char *CharData = reinterpret_cast<const char *>(Data.data());
+  return StringRef(CharData, Data.size());
+}

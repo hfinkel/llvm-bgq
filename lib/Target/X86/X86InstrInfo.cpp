@@ -2141,6 +2141,12 @@ int X86InstrInfo::getSPAdjust(const MachineInstr *MI) const {
   case X86::PUSH32rmr:
   case X86::PUSHi32:
     return 4;
+  case X86::PUSH64i8:
+  case X86::PUSH64r:
+  case X86::PUSH64rmm:
+  case X86::PUSH64rmr:
+  case X86::PUSH64i32:
+    return 8;
   }
 }
 
@@ -4531,7 +4537,7 @@ void X86InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     // as this is usually wrong to read an undef value.
     if (MachineBasicBlock::LQR_Unknown == LQR) {
       LivePhysRegs LPR(&getRegisterInfo());
-      LPR.addLiveOuts(&MBB, /*AddPristinesAndCSRs*/ true);
+      LPR.addLiveOuts(MBB);
       MachineBasicBlock::iterator I = MBB.end();
       while (I != MI) {
         --I;
