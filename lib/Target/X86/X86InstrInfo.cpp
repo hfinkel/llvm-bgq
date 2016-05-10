@@ -4645,25 +4645,38 @@ static unsigned getLoadStoreRegOpcode(unsigned Reg,
     assert((X86::VR128RegClass.hasSubClassEq(RC) ||
             X86::VR128XRegClass.hasSubClassEq(RC))&& "Unknown 16-byte regclass");
     // If stack is realigned we can use aligned stores.
+    if (X86::VR128RegClass.hasSubClassEq(RC)) {
+      if (isStackAligned)
+        return load ? (HasAVX ? X86::VMOVAPSrm : X86::MOVAPSrm)
+                    : (HasAVX ? X86::VMOVAPSmr : X86::MOVAPSmr);
+      else
+        return load ? (HasAVX ? X86::VMOVUPSrm : X86::MOVUPSrm)
+                    : (HasAVX ? X86::VMOVUPSmr : X86::MOVUPSmr);
+    }
+    assert(STI.hasVLX() && "Using extended register requires VLX");
     if (isStackAligned)
-      return load ?
-        (HasAVX ? X86::VMOVAPSrm : X86::MOVAPSrm) :
-        (HasAVX ? X86::VMOVAPSmr : X86::MOVAPSmr);
+      return load ? X86::VMOVAPSZ128rm : X86::VMOVAPSZ128mr;
     else
-      return load ?
-        (HasAVX ? X86::VMOVUPSrm : X86::MOVUPSrm) :
-        (HasAVX ? X86::VMOVUPSmr : X86::MOVUPSmr);
+      return load ? X86::VMOVUPSZ128rm : X86::VMOVUPSZ128mr;
   }
   case 32:
     assert((X86::VR256RegClass.hasSubClassEq(RC) ||
             X86::VR256XRegClass.hasSubClassEq(RC)) && "Unknown 32-byte regclass");
     // If stack is realigned we can use aligned stores.
+    if (X86::VR256RegClass.hasSubClassEq(RC)) {
+      if (isStackAligned)
+        return load ? X86::VMOVAPSYrm : X86::VMOVAPSYmr;
+      else
+        return load ? X86::VMOVUPSYrm : X86::VMOVUPSYmr;
+    }
+    assert(STI.hasVLX() && "Using extended register requires VLX");
     if (isStackAligned)
-      return load ? X86::VMOVAPSYrm : X86::VMOVAPSYmr;
+      return load ? X86::VMOVAPSZ256rm : X86::VMOVAPSZ256mr;
     else
-      return load ? X86::VMOVUPSYrm : X86::VMOVUPSYmr;
+      return load ? X86::VMOVUPSZ256rm : X86::VMOVUPSZ256mr;
   case 64:
     assert(X86::VR512RegClass.hasSubClassEq(RC) && "Unknown 64-byte regclass");
+    assert(STI.hasVLX() && "Using 512-bit register requires AVX512");
     if (isStackAligned)
       return load ? X86::VMOVAPSZrm : X86::VMOVAPSZmr;
     else
@@ -5512,6 +5525,10 @@ bool X86InstrInfo::expandPostRAPseudo(MachineBasicBlock::iterator MI) const {
   case X86::AVX_SET0:
     assert(HasAVX && "AVX not supported");
     return Expand2AddrUndef(MIB, get(X86::VXORPSYrr));
+  case X86::AVX512_128_SET0:
+    return Expand2AddrUndef(MIB, get(X86::VPXORDZ128rr));
+  case X86::AVX512_256_SET0:
+    return Expand2AddrUndef(MIB, get(X86::VPXORDZ256rr));
   case X86::AVX512_512_SET0:
     return Expand2AddrUndef(MIB, get(X86::VPXORDZrr));
   case X86::V_SETALLONES:
@@ -6064,7 +6081,8 @@ breakPartialRegDependency(MachineBasicBlock::iterator MI, unsigned OpNum,
 
 MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
     MachineFunction &MF, MachineInstr *MI, ArrayRef<unsigned> Ops,
-    MachineBasicBlock::iterator InsertPt, int FrameIndex) const {
+    MachineBasicBlock::iterator InsertPt, int FrameIndex,
+    LiveIntervals *LIS) const {
   // Check switch flag
   if (NoFusing)
     return nullptr;
@@ -6176,14 +6194,15 @@ static bool isNonFoldablePartialRegisterLoad(const MachineInstr &LoadMI,
 
 MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
     MachineFunction &MF, MachineInstr *MI, ArrayRef<unsigned> Ops,
-    MachineBasicBlock::iterator InsertPt, MachineInstr *LoadMI) const {
+    MachineBasicBlock::iterator InsertPt, MachineInstr *LoadMI,
+    LiveIntervals *LIS) const {
   // If loading from a FrameIndex, fold directly from the FrameIndex.
   unsigned NumOps = LoadMI->getDesc().getNumOperands();
   int FrameIndex;
   if (isLoadFromStackSlot(LoadMI, FrameIndex)) {
     if (isNonFoldablePartialRegisterLoad(*LoadMI, *MI, MF))
       return nullptr;
-    return foldMemoryOperandImpl(MF, MI, Ops, InsertPt, FrameIndex);
+    return foldMemoryOperandImpl(MF, MI, Ops, InsertPt, FrameIndex, LIS);
   }
 
   // Check switch flag
