@@ -1561,24 +1561,12 @@ void DwarfDebug::emitDebugARanges() {
     }
   }
 
-  // Add terminating symbols for each section.
-  for (const auto &I : SectionMap) {
-    MCSection *Section = I.first;
-    MCSymbol *Sym = nullptr;
-
-    if (Section)
-      Sym = Asm->OutStreamer->endSection(Section);
-
-    // Insert a final terminator.
-    SectionMap[Section].push_back(SymbolCU(nullptr, Sym));
-  }
-
   DenseMap<DwarfCompileUnit *, std::vector<ArangeSpan>> Spans;
 
   for (auto &I : SectionMap) {
-    const MCSection *Section = I.first;
+    MCSection *Section = I.first;
     SmallVector<SymbolCU, 8> &List = I.second;
-    if (List.size() < 2)
+    if (List.size() < 1)
       continue;
 
     // If we have no section (e.g. common), just write out
@@ -1588,8 +1576,8 @@ void DwarfDebug::emitDebugARanges() {
         ArangeSpan Span;
         Span.Start = Cur.Sym;
         Span.End = nullptr;
-        if (Cur.CU)
-          Spans[Cur.CU].push_back(Span);
+        assert(Cur.CU);
+        Spans[Cur.CU].push_back(Span);
       }
       continue;
     }
@@ -1609,6 +1597,9 @@ void DwarfDebug::emitDebugARanges() {
       return IA < IB;
     });
 
+    // Insert a final terminator.
+    List.push_back(SymbolCU(nullptr, Asm->OutStreamer->endSection(Section)));
+
     // Build spans between each label.
     const MCSymbol *StartSym = List[0].Sym;
     for (size_t n = 1, e = List.size(); n < e; n++) {
@@ -1620,6 +1611,7 @@ void DwarfDebug::emitDebugARanges() {
         ArangeSpan Span;
         Span.Start = StartSym;
         Span.End = Cur.Sym;
+        assert(Prev.CU);
         Spans[Prev.CU].push_back(Span);
         StartSym = Cur.Sym;
       }
