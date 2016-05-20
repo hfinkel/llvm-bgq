@@ -356,7 +356,8 @@ void LiveRangeEdit::eliminateDeadDef(MachineInstr *MI, ToShrinkSet &ToShrink) {
 }
 
 void LiveRangeEdit::eliminateDeadDefs(SmallVectorImpl<MachineInstr *> &Dead,
-                                      ArrayRef<unsigned> RegsBeingSpilled) {
+                                      ArrayRef<unsigned> RegsBeingSpilled,
+                                      bool NoSplit) {
   ToShrinkSet ToShrink;
 
   for (;;) {
@@ -376,6 +377,9 @@ void LiveRangeEdit::eliminateDeadDefs(SmallVectorImpl<MachineInstr *> &Dead,
     if (TheDelegate)
       TheDelegate->LRE_WillShrinkVirtReg(VReg);
     if (!LIS.shrinkToUses(LI, &Dead))
+      continue;
+
+    if (NoSplit)
       continue;
 
     // Don't create new intervals for a register being spilled.
