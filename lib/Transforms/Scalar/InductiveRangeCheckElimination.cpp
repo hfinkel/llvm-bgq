@@ -118,7 +118,7 @@ class InductiveRangeCheck {
   const SCEV *Offset;
   const SCEV *Scale;
   Value *Length;
-  BranchInst *Branch;
+  Use *CheckUse;
   RangeCheckKind Kind;
 
   static RangeCheckKind parseRangeCheckICmp(Loop *L, ICmpInst *ICI,
@@ -127,10 +127,11 @@ class InductiveRangeCheck {
 
   static InductiveRangeCheck::RangeCheckKind
   parseRangeCheck(Loop *L, ScalarEvolution &SE, Value *Condition,
-                  const SCEV *&Index, Value *&UpperLimit);
+                  Value *&Index, Value *&UpperLimit);
 
-  InductiveRangeCheck() :
-    Offset(nullptr), Scale(nullptr), Length(nullptr), Branch(nullptr) { }
+  InductiveRangeCheck()
+      : Offset(nullptr), Scale(nullptr), Length(nullptr),
+        CheckUse(nullptr) {}
 
 public:
   const SCEV *getOffset() const { return Offset; }
@@ -149,9 +150,9 @@ public:
       Length->print(OS);
     else
       OS << "(null)";
-    OS << "\n  Branch: ";
-    getBranch()->print(OS);
-    OS << "\n";
+    OS << "\n  CheckUse: ";
+    getCheckUse()->getUser()->print(OS);
+    OS << " Operand: " << getCheckUse()->getOperandNo() << "\n";
   }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
@@ -160,7 +161,7 @@ public:
   }
 #endif
 
-  BranchInst *getBranch() const { return Branch; }
+  Use *getCheckUse() const { return CheckUse; }
 
   /// Represents an signed integer range [Range.getBegin(), Range.getEnd()).  If
   /// R.getEnd() sle R.getBegin(), then R denotes the empty range.
@@ -316,7 +317,7 @@ InductiveRangeCheck::parseRangeCheckICmp(Loop *L, ICmpInst *ICI,
 /// the range check is recognized to be `RANGE_CHECK_UPPER` or stronger.
 InductiveRangeCheck::RangeCheckKind
 InductiveRangeCheck::parseRangeCheck(Loop *L, ScalarEvolution &SE,
-                                     Value *Condition, const SCEV *&Index,
+                                     Value *Condition, Value *&Index,
                                      Value *&Length) {
   using namespace llvm::PatternMatch;
 
@@ -344,29 +345,14 @@ InductiveRangeCheck::parseRangeCheck(Loop *L, ScalarEvolution &SE,
     if (LengthA != nullptr && LengthB != nullptr && LengthA != LengthB)
       return InductiveRangeCheck::RANGE_CHECK_UNKNOWN;
 
-    Index = SE.getSCEV(IndexA);
-    if (isa<SCEVCouldNotCompute>(Index))
-      return InductiveRangeCheck::RANGE_CHECK_UNKNOWN;
-
+    Index = IndexA;
     Length = LengthA == nullptr ? LengthB : LengthA;
 
     return (InductiveRangeCheck::RangeCheckKind)(RCKindA | RCKindB);
   }
 
-  if (ICmpInst *ICI = dyn_cast<ICmpInst>(Condition)) {
-    Value *IndexVal = nullptr;
-
-    auto RCKind = parseRangeCheckICmp(L, ICI, SE, IndexVal, Length);
-
-    if (RCKind == InductiveRangeCheck::RANGE_CHECK_UNKNOWN)
-      return InductiveRangeCheck::RANGE_CHECK_UNKNOWN;
-
-    Index = SE.getSCEV(IndexVal);
-    if (isa<SCEVCouldNotCompute>(Index))
-      return InductiveRangeCheck::RANGE_CHECK_UNKNOWN;
-
-    return RCKind;
-  }
+  if (ICmpInst *ICI = dyn_cast<ICmpInst>(Condition))
+    return parseRangeCheckICmp(L, ICI, SE, Index, Length);
 
   return InductiveRangeCheck::RANGE_CHECK_UNKNOWN;
 }
@@ -383,20 +369,19 @@ InductiveRangeCheck::create(BranchInst *BI, Loop *L, ScalarEvolution &SE,
   if (BPI.getEdgeProbability(BI->getParent(), (unsigned) 0) < LikelyTaken)
     return None;
 
-  Value *Length = nullptr;
-  const SCEV *IndexSCEV = nullptr;
+  Value *Length = nullptr, *Index = nullptr;
 
   auto RCKind = InductiveRangeCheck::parseRangeCheck(L, SE, BI->getCondition(),
-                                                     IndexSCEV, Length);
+                                                     Index, Length);
 
   if (RCKind == InductiveRangeCheck::RANGE_CHECK_UNKNOWN)
     return None;
 
-  assert(IndexSCEV && "contract with SplitRangeCheckCondition!");
+  assert(Index && "contract with parseRangeCheck!");
   assert((!(RCKind & InductiveRangeCheck::RANGE_CHECK_UPPER) || Length) &&
-         "contract with SplitRangeCheckCondition!");
+         "contract with parseRangeCheck!");
 
-  const SCEVAddRecExpr *IndexAddRec = dyn_cast<SCEVAddRecExpr>(IndexSCEV);
+  const auto *IndexAddRec = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(Index));
   bool IsAffineIndex =
       IndexAddRec && (IndexAddRec->getLoop() == L) && IndexAddRec->isAffine();
 
@@ -407,7 +392,7 @@ InductiveRangeCheck::create(BranchInst *BI, Loop *L, ScalarEvolution &SE,
   IRC.Length = Length;
   IRC.Offset = IndexAddRec->getStart();
   IRC.Scale = IndexAddRec->getStepRecurrence(SE);
-  IRC.Branch = BI;
+  IRC.CheckUse = &BI->getOperandUse(0);
   IRC.Kind = RCKind;
   return IRC;
 }
@@ -1474,7 +1459,7 @@ bool InductiveRangeCheckElimination::runOnLoop(Loop *L, LPPassManager &LPM) {
       ConstantInt *FoldedRangeCheck = IRC.getPassingDirection()
                                           ? ConstantInt::getTrue(Context)
                                           : ConstantInt::getFalse(Context);
-      IRC.getBranch()->setCondition(FoldedRangeCheck);
+      IRC.getCheckUse()->set(FoldedRangeCheck);
     }
   }
 

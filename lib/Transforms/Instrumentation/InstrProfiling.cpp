@@ -447,8 +447,9 @@ void InstrProfiling::emitVNodes() {
   // the average number of counters per site is low. For small
   // apps with very few sites, this may not be true. Bump up the
   // number of counters in this case.
-  if (NumCounters < 10)
-    NumCounters *= 2;
+#define INSTR_PROF_MIN_VAL_COUNTS 10
+  if (NumCounters < INSTR_PROF_MIN_VAL_COUNTS)
+    NumCounters = std::max(INSTR_PROF_MIN_VAL_COUNTS, (int) NumCounters * 2);
 
   auto &Ctx = M->getContext();
   Type *VNodeTypes[] = {
@@ -549,6 +550,8 @@ void InstrProfiling::emitRuntimeHook() {
   User->addFnAttr(Attribute::NoInline);
   if (Options.NoRedZone) User->addFnAttr(Attribute::NoRedZone);
   User->setVisibility(GlobalValue::HiddenVisibility);
+  if (Triple(M->getTargetTriple()).isOSBinFormatCOFF())
+    User->setComdat(M->getOrInsertComdat(User->getName()));
 
   IRBuilder<> IRB(BasicBlock::Create(M->getContext(), "", User));
   auto *Load = IRB.CreateLoad(Var);

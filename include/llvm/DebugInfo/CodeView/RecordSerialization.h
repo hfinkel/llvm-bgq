@@ -114,8 +114,8 @@ template <typename T, typename U> struct serialize_array_impl {
   U Func;
 };
 
-template <typename T> struct serialize_array_tail_impl {
-  serialize_array_tail_impl(std::vector<T> &Item) : Item(Item) {}
+template <typename T> struct serialize_vector_tail_impl {
+  serialize_vector_tail_impl(std::vector<T> &Item) : Item(Item) {}
 
   std::error_code deserialize(ArrayRef<uint8_t> &Data) const {
     T Field;
@@ -129,6 +129,37 @@ template <typename T> struct serialize_array_tail_impl {
   }
 
   std::vector<T> &Item;
+};
+
+struct serialize_null_term_string_array_impl {
+  serialize_null_term_string_array_impl(std::vector<StringRef> &Item)
+      : Item(Item) {}
+
+  std::error_code deserialize(ArrayRef<uint8_t> &Data) const {
+    StringRef Field;
+    // Stop when we run out of bytes or we hit record padding bytes.
+    while (Data.front() != 0) {
+      if (auto EC = consume(Data, Field))
+        return EC;
+      Item.push_back(Field);
+    }
+    Data = Data.drop_front(1);
+    return std::error_code();
+  }
+
+  std::vector<StringRef> &Item;
+};
+
+template <typename T> struct serialize_arrayref_tail_impl {
+  serialize_arrayref_tail_impl(ArrayRef<T> &Item) : Item(Item) {}
+
+  std::error_code deserialize(ArrayRef<uint8_t> &Data) const {
+    uint32_t Count = Data.size() / sizeof(T);
+    Item = ArrayRef<T>(reinterpret_cast<const T *>(Data.begin()), Count);
+    return std::error_code();
+  }
+
+  ArrayRef<T> &Item;
 };
 
 template <typename T> struct serialize_numeric_impl {
@@ -146,9 +177,19 @@ serialize_array_impl<T, U> serialize_array(ArrayRef<T> &Item, U Func) {
   return serialize_array_impl<T, U>(Item, Func);
 }
 
+inline serialize_null_term_string_array_impl
+serialize_null_term_string_array(std::vector<StringRef> &Item) {
+  return serialize_null_term_string_array_impl(Item);
+}
+
 template <typename T>
-serialize_array_tail_impl<T> serialize_array_tail(std::vector<T> &Item) {
-  return serialize_array_tail_impl<T>(Item);
+serialize_vector_tail_impl<T> serialize_array_tail(std::vector<T> &Item) {
+  return serialize_vector_tail_impl<T>(Item);
+}
+
+template <typename T>
+serialize_arrayref_tail_impl<T> serialize_array_tail(ArrayRef<T> &Item) {
+  return serialize_arrayref_tail_impl<T>(Item);
 }
 
 template <typename T> serialize_numeric_impl<T> serialize_numeric(T &Item) {
@@ -169,6 +210,10 @@ template <typename T> serialize_numeric_impl<T> serialize_numeric(T &Item) {
 // This is an array that exhausts the remainder of the input buffer.
 #define CV_ARRAY_FIELD_TAIL(I) serialize_array_tail(I)
 
+// This is an array that consumes null terminated strings until a double null
+// is encountered.
+#define CV_STRING_ARRAY_NULL_TERM(I) serialize_null_term_string_array(I)
+
 #define CV_NUMERIC_FIELD(I) serialize_numeric(I)
 
 template <typename T, typename U>
@@ -183,9 +228,21 @@ std::error_code consume(ArrayRef<uint8_t> &Data,
   return Item.deserialize(Data);
 }
 
+inline std::error_code
+consume(ArrayRef<uint8_t> &Data,
+        const serialize_null_term_string_array_impl &Item) {
+  return Item.deserialize(Data);
+}
+
 template <typename T>
 std::error_code consume(ArrayRef<uint8_t> &Data,
-                        const serialize_array_tail_impl<T> &Item) {
+                        const serialize_vector_tail_impl<T> &Item) {
+  return Item.deserialize(Data);
+}
+
+template <typename T>
+std::error_code consume(ArrayRef<uint8_t> &Data,
+                        const serialize_arrayref_tail_impl<T> &Item) {
   return Item.deserialize(Data);
 }
 

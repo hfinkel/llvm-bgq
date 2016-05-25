@@ -1398,8 +1398,7 @@ void computeKnownBits(Value *V, APInt &KnownZero, APInt &KnownOne,
     return;
   }
   // Null and aggregate-zero are all-zeros.
-  if (isa<ConstantPointerNull>(V) ||
-      isa<ConstantAggregateZero>(V)) {
+  if (isa<ConstantPointerNull>(V) || isa<ConstantAggregateZero>(V)) {
     KnownOne.clearAllBits();
     KnownZero = APInt::getAllOnesValue(BitWidth);
     return;
@@ -1679,7 +1678,20 @@ bool isKnownNonZero(Value *V, unsigned Depth, const Query &Q) {
     if (isa<ConstantInt>(C))
       // Must be non-zero due to null test above.
       return true;
-    // TODO: Handle vectors
+
+    // For constant vectors, check that all elements are undefined or known
+    // non-zero to determine that the whole vector is known non-zero.
+    if (auto *VecTy = dyn_cast<VectorType>(C->getType())) {
+      for (unsigned i = 0, e = VecTy->getNumElements(); i != e; ++i) {
+        Constant *Elt = C->getAggregateElement(i);
+        if (!Elt || Elt->isNullValue())
+          return false;
+        if (!isa<UndefValue>(Elt) && !isa<ConstantInt>(Elt))
+          return false;
+      }
+      return true;
+    }
+
     return false;
   }
 
@@ -3766,8 +3778,7 @@ static Value *lookThroughCast(CmpInst *CmpI, Value *V1, Value *V2,
   return CastedTo;
 }
 
-SelectPatternResult llvm::matchSelectPattern(Value *V,
-                                             Value *&LHS, Value *&RHS,
+SelectPatternResult llvm::matchSelectPattern(Value *V, Value *&LHS, Value *&RHS,
                                              Instruction::CastOps *CastOp) {
   SelectInst *SI = dyn_cast<SelectInst>(V);
   if (!SI) return {SPF_UNKNOWN, SPNB_NA, false};
