@@ -35,6 +35,7 @@
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/UnrollLoop.h"
 #include <climits>
+#include <utility>
 
 using namespace llvm;
 
@@ -464,40 +465,36 @@ analyzeLoopUnrollCost(const Loop *L, unsigned TripCount, DominatorTree &DT,
 
       // Add in the live successors by first checking whether we have terminator
       // that may be simplified based on the values simplified by this call.
+      BasicBlock *KnownSucc = nullptr;
       if (BranchInst *BI = dyn_cast<BranchInst>(TI)) {
         if (BI->isConditional()) {
           if (Constant *SimpleCond =
                   SimplifiedValues.lookup(BI->getCondition())) {
-            BasicBlock *Succ = nullptr;
             // Just take the first successor if condition is undef
             if (isa<UndefValue>(SimpleCond))
-              Succ = BI->getSuccessor(0);
-            else
-              Succ = BI->getSuccessor(
-                  cast<ConstantInt>(SimpleCond)->isZero() ? 1 : 0);
-            if (L->contains(Succ))
-              BBWorklist.insert(Succ);
-            else
-              ExitWorklist.insert({BB, Succ});
-            continue;
+              KnownSucc = BI->getSuccessor(0);
+            else if (ConstantInt *SimpleCondVal =
+                         dyn_cast<ConstantInt>(SimpleCond))
+              KnownSucc = BI->getSuccessor(SimpleCondVal->isZero() ? 1 : 0);
           }
         }
       } else if (SwitchInst *SI = dyn_cast<SwitchInst>(TI)) {
         if (Constant *SimpleCond =
                 SimplifiedValues.lookup(SI->getCondition())) {
-          BasicBlock *Succ = nullptr;
           // Just take the first successor if condition is undef
           if (isa<UndefValue>(SimpleCond))
-            Succ = SI->getSuccessor(0);
-          else
-            Succ = SI->findCaseValue(cast<ConstantInt>(SimpleCond))
-                       .getCaseSuccessor();
-          if (L->contains(Succ))
-            BBWorklist.insert(Succ);
-          else
-            ExitWorklist.insert({BB, Succ});
-          continue;
+            KnownSucc = SI->getSuccessor(0);
+          else if (ConstantInt *SimpleCondVal =
+                       dyn_cast<ConstantInt>(SimpleCond))
+            KnownSucc = SI->findCaseValue(SimpleCondVal).getCaseSuccessor();
         }
+      }
+      if (KnownSucc) {
+        if (L->contains(KnownSucc))
+          BBWorklist.insert(KnownSucc);
+        else
+          ExitWorklist.insert({BB, KnownSucc});
+        continue;
       }
 
       // Add BB's successors to the worklist.
@@ -943,8 +940,9 @@ public:
   LoopUnroll(Optional<unsigned> Threshold = None,
              Optional<unsigned> Count = None,
              Optional<bool> AllowPartial = None, Optional<bool> Runtime = None)
-      : LoopPass(ID), ProvidedCount(Count), ProvidedThreshold(Threshold),
-        ProvidedAllowPartial(AllowPartial), ProvidedRuntime(Runtime) {
+      : LoopPass(ID), ProvidedCount(std::move(Count)),
+        ProvidedThreshold(Threshold), ProvidedAllowPartial(AllowPartial),
+        ProvidedRuntime(Runtime) {
     initializeLoopUnrollPass(*PassRegistry::getPassRegistry());
   }
 

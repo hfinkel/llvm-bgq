@@ -67,6 +67,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 #include "llvm/ProfileData/InstrProfReader.h"
+#include "llvm/ProfileData/ProfileCommon.h"
 #include "llvm/Support/BranchProbability.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/JamCRC.h"
@@ -149,7 +150,7 @@ public:
 
   // Provide the profile filename as the parameter.
   PGOInstrumentationUseLegacyPass(std::string Filename = "")
-      : ModulePass(ID), ProfileFileName(Filename) {
+      : ModulePass(ID), ProfileFileName(std::move(Filename)) {
     if (!PGOTestProfileFile.empty())
       ProfileFileName = PGOTestProfileFile;
     initializePGOInstrumentationUseLegacyPassPass(
@@ -478,6 +479,9 @@ public:
   // Return the function hotness from the profile.
   FuncFreqAttr getFuncFreqAttr() const { return FreqAttr; }
 
+  // Return the profile record for this function;
+  InstrProfRecord &getProfileRecord() { return ProfileRecord; }
+
 private:
   Function &F;
   Module *M;
@@ -790,7 +794,7 @@ static void createIRLevelProfileFlagVariable(Module &M) {
       INSTR_PROF_QUOTE(IR_LEVEL_PROF_VERSION_VAR));
   IRLevelVersionVariable->setVisibility(GlobalValue::DefaultVisibility);
   Triple TT(M.getTargetTriple());
-  if (TT.isOSBinFormatMachO())
+  if (!TT.supportsCOMDAT())
     IRLevelVersionVariable->setLinkage(GlobalValue::WeakAnyLinkage);
   else
     IRLevelVersionVariable->setComdat(M.getOrInsertComdat(
@@ -883,6 +887,7 @@ static bool annotateAllFunctions(
 
   std::vector<Function *> HotFunctions;
   std::vector<Function *> ColdFunctions;
+  InstrProfSummaryBuilder Builder(ProfileSummaryBuilder::DefaultCutoffs);
   for (auto &F : M) {
     if (F.isDeclaration())
       continue;
@@ -890,13 +895,15 @@ static bool annotateAllFunctions(
     auto *BFI = LookupBFI(F);
     PGOUseFunc Func(F, &M, BPI, BFI);
     setPGOCountOnFunc(Func, PGOReader.get());
+    if (!Func.getProfileRecord().Counts.empty())
+      Builder.addRecord(Func.getProfileRecord());
     PGOUseFunc::FuncFreqAttr FreqAttr = Func.getFuncFreqAttr();
     if (FreqAttr == PGOUseFunc::FFA_Cold)
       ColdFunctions.push_back(&F);
     else if (FreqAttr == PGOUseFunc::FFA_Hot)
       HotFunctions.push_back(&F);
   }
-
+  M.setProfileSummary(Builder.getSummary()->getMD(M.getContext()));
   // Set function hotness attribute from the profile.
   for (auto &F : HotFunctions) {
     F->addFnAttr(llvm::Attribute::InlineHint);
@@ -912,7 +919,7 @@ static bool annotateAllFunctions(
 }
 
 PGOInstrumentationUse::PGOInstrumentationUse(std::string Filename)
-    : ProfileFileName(Filename) {
+    : ProfileFileName(std::move(Filename)) {
   if (!PGOTestProfileFile.empty())
     ProfileFileName = PGOTestProfileFile;
 }
