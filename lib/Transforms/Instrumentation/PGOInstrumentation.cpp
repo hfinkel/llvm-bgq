@@ -691,15 +691,16 @@ void PGOUseFunc::populateCounters() {
   }
 
   DEBUG(dbgs() << "Populate counts in " << NumPasses << " passes.\n");
+#ifndef NDEBUG
   // Assert every BB has a valid counter.
-  uint64_t FuncEntryCount = getBBInfo(&*F.begin()).CountValue;
-  uint64_t FuncMaxCount = FuncEntryCount;
-  for (auto &BB : F) {
+  for (auto &BB : F)
     assert(getBBInfo(&BB).CountValid && "BB count is not valid");
-    uint64_t Count = getBBInfo(&BB).CountValue;
-    if (Count > FuncMaxCount)
-      FuncMaxCount = Count;
-  }
+#endif
+  uint64_t FuncEntryCount = getBBInfo(&*F.begin()).CountValue;
+  F.setEntryCount(FuncEntryCount);
+  uint64_t FuncMaxCount = FuncEntryCount;
+  for (auto &BB : F)
+    FuncMaxCount = std::max(FuncMaxCount, getBBInfo(&BB).CountValue);
   markFunctionAttributes(FuncEntryCount, FuncMaxCount);
 
   DEBUG(FuncInfo.dumpInfo("after reading profile."));
@@ -846,15 +847,6 @@ PreservedAnalyses PGOInstrumentationGen::run(Module &M,
   return PreservedAnalyses::none();
 }
 
-static void setPGOCountOnFunc(PGOUseFunc &Func,
-                              IndexedInstrProfReader *PGOReader) {
-  if (Func.readCounters(PGOReader)) {
-    Func.populateCounters();
-    Func.setBranchWeights();
-    Func.annotateIndirectCallSites();
-  }
-}
-
 static bool annotateAllFunctions(
     Module &M, StringRef ProfileFileName,
     function_ref<BranchProbabilityInfo *(Function &)> LookupBPI,
@@ -894,7 +886,11 @@ static bool annotateAllFunctions(
     auto *BPI = LookupBPI(F);
     auto *BFI = LookupBFI(F);
     PGOUseFunc Func(F, &M, BPI, BFI);
-    setPGOCountOnFunc(Func, PGOReader.get());
+    if (!Func.readCounters(PGOReader.get()))
+      continue;
+    Func.populateCounters();
+    Func.setBranchWeights();
+    Func.annotateIndirectCallSites();
     if (!Func.getProfileRecord().Counts.empty())
       Builder.addRecord(Func.getProfileRecord());
     PGOUseFunc::FuncFreqAttr FreqAttr = Func.getFuncFreqAttr();
@@ -905,6 +901,9 @@ static bool annotateAllFunctions(
   }
   M.setProfileSummary(Builder.getSummary()->getMD(M.getContext()));
   // Set function hotness attribute from the profile.
+  // We have to apply these attributes at the end because their presence
+  // can affect the BranchProbabilityInfo of any callers, resulting in an
+  // inconsistent MST between prof-gen and prof-use.
   for (auto &F : HotFunctions) {
     F->addFnAttr(llvm::Attribute::InlineHint);
     DEBUG(dbgs() << "Set inline attribute to function: " << F->getName()
