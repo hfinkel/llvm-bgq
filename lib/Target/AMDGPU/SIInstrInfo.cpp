@@ -287,6 +287,13 @@ bool SIInstrInfo::getMemOpBaseRegImmOfs(MachineInstr *LdSt, unsigned &BaseReg,
     return true;
   }
 
+  if (isFLAT(*LdSt)) {
+    const MachineOperand *AddrReg = getNamedOperand(*LdSt, AMDGPU::OpName::addr);
+    BaseReg = AddrReg->getReg();
+    Offset = 0;
+    return true;
+  }
+
   return false;
 }
 
@@ -487,7 +494,7 @@ SIInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     Builder.addReg(RI.getSubReg(SrcReg, SubIdx));
 
     if (Idx == SubIndices.size() - 1)
-      Builder.addReg(SrcReg, RegState::Kill | RegState::Implicit);
+      Builder.addReg(SrcReg, getKillRegState(KillSrc) | RegState::Implicit);
 
     if (Idx == 0)
       Builder.addReg(DestReg, RegState::Define | RegState::Implicit);

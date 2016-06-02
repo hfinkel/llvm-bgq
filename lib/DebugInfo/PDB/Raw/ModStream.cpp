@@ -13,6 +13,7 @@
 #include "llvm/DebugInfo/PDB/Raw/ModInfo.h"
 #include "llvm/DebugInfo/PDB/Raw/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Raw/RawError.h"
+#include "llvm/DebugInfo/PDB/Raw/RawTypes.h"
 
 using namespace llvm;
 using namespace llvm::pdb;
@@ -46,6 +47,10 @@ Error ModStream::reload() {
   if (auto EC = Reader.readStreamRef(C13LinesSubstream, C13Size))
     return EC;
 
+  codeview::StreamReader LineReader(C13LinesSubstream);
+  if (auto EC = LineReader.readArray(LineInfo, LineReader.bytesRemaining()))
+    return EC;
+
   uint32_t GlobalRefsSize;
   if (auto EC = Reader.readInteger(GlobalRefsSize))
     return EC;
@@ -60,5 +65,11 @@ Error ModStream::reload() {
 
 iterator_range<codeview::CVSymbolArray::Iterator>
 ModStream::symbols(bool *HadError) const {
-  return llvm::make_range(SymbolsSubstream.begin(), SymbolsSubstream.end());
+  return llvm::make_range(SymbolsSubstream.begin(HadError),
+                          SymbolsSubstream.end());
+}
+
+iterator_range<ModStream::LineInfoArray::Iterator>
+ModStream::lines(bool *HadError) const {
+  return llvm::make_range(LineInfo.begin(HadError), LineInfo.end());
 }

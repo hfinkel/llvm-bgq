@@ -29,8 +29,7 @@ template <typename T> struct VarStreamArrayExtractor {
   // with the following method implemented.  On output return `Len` should
   // contain the number of bytes to consume from the stream, and `Item` should
   // be initialized with the proper value.
-  Error operator()(const StreamInterface &Stream, uint32_t &Len,
-                   T &Item) const = delete;
+  Error operator()(StreamRef Stream, uint32_t &Len, T &Item) const = delete;
 };
 
 /// VarStreamArray represents an array of variable length records backed by a
@@ -77,13 +76,12 @@ public:
     auto EC = Extract(IterRef, ThisLen, ThisValue);
     if (EC) {
       consumeError(std::move(EC));
-      this->Array = nullptr;
-      HasError = true;
-      if (HadError)
-        *HadError = true;
+      markError();
     }
   }
-  VarStreamArrayIterator() : Array(nullptr), IterRef(), HasError(false) {}
+  VarStreamArrayIterator()
+      : Array(nullptr), ThisLen(0), ThisValue(), IterRef(), HasError(false),
+        HadError(nullptr) {}
   ~VarStreamArrayIterator() {}
 
   bool operator==(const IterType &R) const {
@@ -109,23 +107,23 @@ public:
   }
 
   IterType &operator++() {
-    if (!Array || IterRef.getLength() == 0 || ThisLen == 0 || HasError)
-      return *this;
+    // We are done with the current record, discard it so that we are
+    // positioned at the next record.
     IterRef = IterRef.drop_front(ThisLen);
-    if (IterRef.getLength() == 0)
-      ThisLen = 0;
-    else {
+    if (IterRef.getLength() == 0) {
+      // There is nothing after the current record, we must make this an end
+      // iterator.
+      moveToEnd();
+    } else {
+      // There is some data after the current record.
       auto EC = Extract(IterRef, ThisLen, ThisValue);
       if (EC) {
         consumeError(std::move(EC));
-        HasError = true;
-        if (HadError)
-          *HadError = true;
+        markError();
+      } else if (ThisLen == 0) {
+        // An empty record? Make this an end iterator.
+        moveToEnd();
       }
-    }
-    if (ThisLen == 0 || HasError) {
-      Array = nullptr;
-      ThisLen = 0;
     }
     return *this;
   }
@@ -137,6 +135,17 @@ public:
   }
 
 private:
+  void moveToEnd() {
+    Array = nullptr;
+    ThisLen = 0;
+  }
+  void markError() {
+    moveToEnd();
+    HasError = true;
+    if (HadError != nullptr)
+      *HadError = true;
+  }
+
   const ArrayType *Array;
   uint32_t ThisLen;
   ValueType ThisValue;

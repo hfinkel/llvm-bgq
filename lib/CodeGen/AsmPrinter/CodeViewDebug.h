@@ -117,15 +117,10 @@ class LLVM_LIBRARY_VISIBILITY CodeViewDebug : public DebugHandlerBase {
   /// to be confused with type indices for LF_FUNC_ID records.
   unsigned NextFuncId = 0;
 
-  codeview::TypeIndex VoidFnTyIdx;
-
-  /// Get a type index for a generic void function type.
-  codeview::TypeIndex getGenericFunctionTypeIndex();
-
   InlineSite &getInlineSite(const DILocation *InlinedAt,
                             const DISubprogram *Inlinee);
 
-  void recordFuncIdForSubprogram(const DISubprogram *SP);
+  codeview::TypeIndex getFuncIdForSubprogram(const DISubprogram *SP);
 
   static void collectInlineSiteChildren(SmallVectorImpl<unsigned> &Children,
                                         const FunctionInfo &FI,
@@ -184,6 +179,18 @@ class LLVM_LIBRARY_VISIBILITY CodeViewDebug : public DebugHandlerBase {
   void recordLocalVariable(LocalVariable &&Var, const DILocation *Loc);
 
   void emitLocalVariable(const LocalVariable &Var);
+
+  /// Translates the DIType to codeview if necessary and returns a type index
+  /// for it.
+  codeview::TypeIndex getTypeIndex(DITypeRef Ty);
+
+  codeview::TypeIndex lowerType(const DIType *Ty);
+  codeview::TypeIndex lowerTypeAlias(const DIDerivedType *Ty);
+  codeview::TypeIndex lowerTypeBasic(const DIBasicType *Ty);
+  codeview::TypeIndex lowerTypePointer(const DIDerivedType *Ty);
+  codeview::TypeIndex lowerTypeMemberPointer(const DIDerivedType *Ty);
+  codeview::TypeIndex lowerTypeModifier(const DIDerivedType *Ty);
+  codeview::TypeIndex lowerTypeFunction(const DISubroutineType *Ty);
 
 public:
   CodeViewDebug(AsmPrinter *Asm);
