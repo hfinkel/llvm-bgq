@@ -27,6 +27,8 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Config/config.h"
 #include "llvm/DebugInfo/CodeView/EnumTables.h"
+#include "llvm/DebugInfo/CodeView/Line.h"
+#include "llvm/DebugInfo/CodeView/ModuleSubstreamVisitor.h"
 #include "llvm/DebugInfo/CodeView/StreamReader.h"
 #include "llvm/DebugInfo/CodeView/SymbolDumper.h"
 #include "llvm/DebugInfo/CodeView/TypeDumper.h"
@@ -68,6 +70,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
+using namespace llvm::codeview;
 using namespace llvm::pdb;
 
 namespace opts {
@@ -424,7 +427,7 @@ static Error dumpNamedStream(ScopedPrinter &P, PDBFile &File) {
     for (uint32_t ID : NameTable.name_ids()) {
       StringRef Str = NameTable.getStringForID(ID);
       if (!Str.empty())
-        P.printString(Str);
+        P.printString(to_string(ID), Str);
     }
   }
   return Error::success();
@@ -499,7 +502,7 @@ static Error dumpDbiStream(ScopedPrinter &P, PDBFile &File,
           ListScope SS(P, "Symbols");
           codeview::CVSymbolDumper SD(P, TD, nullptr, false);
           bool HadError = false;
-          for (auto &S : ModS.symbols(&HadError)) {
+          for (const auto &S : ModS.symbols(&HadError)) {
             DictScope DD(P, "");
 
             if (opts::DumpModuleSyms)
@@ -515,18 +518,95 @@ static Error dumpDbiStream(ScopedPrinter &P, PDBFile &File,
         if (opts::DumpLineInfo) {
           ListScope SS(P, "LineInfo");
           bool HadError = false;
-          for (auto &L : ModS.lines(&HadError)) {
-            DictScope DD(P, "");
-            P.printEnum("Kind", uint32_t(L.getSubstreamKind()),
-                        codeview::getModuleSubstreamKindNames());
-            ArrayRef<uint8_t> Data;
-            codeview::StreamReader R(L.getRecordData());
-            if (auto EC = R.readBytes(Data, R.bytesRemaining())) {
-              return make_error<RawError>(
-                  raw_error_code::corrupt_file,
-                  "DBI stream contained corrupt line info record");
+          // Define a locally scoped visitor to print the different
+          // substream types types.
+          class RecordVisitor : public codeview::IModuleSubstreamVisitor {
+          public:
+            RecordVisitor(ScopedPrinter &P, PDBFile &F) : P(P), F(F) {}
+            Error visitUnknown(ModuleSubstreamKind Kind,
+                               StreamRef Stream) override {
+              DictScope DD(P, "Unknown");
+              ArrayRef<uint8_t> Data;
+              StreamReader R(Stream);
+              if (auto EC = R.readBytes(Data, R.bytesRemaining())) {
+                return make_error<RawError>(
+                    raw_error_code::corrupt_file,
+                    "DBI stream contained corrupt line info record");
+              }
+              P.printBinaryBlock("Data", Data);
+              return Error::success();
             }
-            P.printBinaryBlock("Data", Data);
+            Error
+            visitFileChecksums(StreamRef Data,
+                               const FileChecksumArray &Checksums) override {
+              DictScope DD(P, "FileChecksums");
+              for (const auto &C : Checksums) {
+                DictScope DDD(P, "Checksum");
+                if (auto Result = getFileNameForOffset(C.FileNameOffset))
+                  P.printString("FileName", Result.get());
+                else
+                  return Result.takeError();
+                P.flush();
+                P.printEnum("Kind", uint8_t(C.Kind), getFileChecksumNames());
+                P.printBinaryBlock("Checksum", C.Checksum);
+              }
+              return Error::success();
+            }
+
+            Error visitLines(StreamRef Data, const LineSubstreamHeader *Header,
+                             const LineInfoArray &Lines) override {
+              DictScope DD(P, "Lines");
+              for (const auto &L : Lines) {
+                if (auto Result = getFileNameForOffset2(L.NameIndex))
+                  P.printString("FileName", Result.get());
+                else
+                  return Result.takeError();
+                P.flush();
+                for (const auto &N : L.LineNumbers) {
+                  DictScope DDD(P, "Line");
+                  LineInfo LI(N.Flags);
+                  P.printNumber("Offset", N.Offset);
+                  if (LI.isAlwaysStepInto())
+                    P.printString("StepInto", StringRef("Always"));
+                  else if (LI.isNeverStepInto())
+                    P.printString("StepInto", StringRef("Never"));
+                  else
+                    P.printNumber("LineNumberStart", LI.getStartLine());
+                  P.printNumber("EndDelta", LI.getLineDelta());
+                  P.printBoolean("IsStatement", LI.isStatement());
+                }
+                for (const auto &C : L.Columns) {
+                  DictScope DDD(P, "Column");
+                  P.printNumber("Start", C.StartColumn);
+                  P.printNumber("End", C.EndColumn);
+                }
+              }
+              return Error::success();
+            }
+
+          private:
+            Expected<StringRef> getFileNameForOffset(uint32_t Offset) {
+              auto StringT = F.getStringTable();
+              if (auto EC = StringT.takeError())
+                return std::move(EC);
+              NameHashTable &ST = StringT.get();
+              return ST.getStringForID(Offset);
+            }
+            Expected<StringRef> getFileNameForOffset2(uint32_t Offset) {
+              auto DbiS = F.getPDBDbiStream();
+              if (auto EC = DbiS.takeError())
+                return std::move(EC);
+              auto &DS = DbiS.get();
+              return DS.getFileNameForIndex(Offset);
+            }
+            ScopedPrinter &P;
+            PDBFile &F;
+          };
+
+          RecordVisitor V(P, File);
+          for (const auto &L : ModS.lines(&HadError)) {
+            if (auto EC = codeview::visitModuleSubstream(L, V))
+              return EC;
           }
         }
       }
@@ -631,14 +711,14 @@ static Error dumpTpiStream(ScopedPrinter &P, PDBFile &File,
 
   auto TpiS = (StreamIdx == StreamTPI) ? File.getPDBTpiStream()
                                        : File.getPDBIpiStream();
-    if (auto EC = TpiS.takeError())
-      return EC;
-    TpiStream &Tpi = TpiS.get();
+  if (auto EC = TpiS.takeError())
+    return EC;
+  TpiStream &Tpi = TpiS.get();
 
-    if (DumpRecords || DumpRecordBytes) {
-      DictScope D(P, Label);
+  if (DumpRecords || DumpRecordBytes) {
+    DictScope D(P, Label);
 
-      P.printNumber(VerLabel, Tpi.getTpiVersion());
+    P.printNumber(VerLabel, Tpi.getTpiVersion());
     P.printNumber("Record count", Tpi.NumTypeRecords());
 
     ListScope L(P, "Records");
