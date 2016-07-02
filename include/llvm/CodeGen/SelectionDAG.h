@@ -634,13 +634,7 @@ public:
   /// which must be a vector type, must match the number of mask elements
   /// NumElts. An integer mask element equal to -1 is treated as undefined.
   SDValue getVectorShuffle(EVT VT, const SDLoc &dl, SDValue N1, SDValue N2,
-                           const int *MaskElts);
-  SDValue getVectorShuffle(EVT VT, const SDLoc &dl, SDValue N1, SDValue N2,
-                           ArrayRef<int> MaskElts) {
-    assert(VT.getVectorNumElements() == MaskElts.size() &&
-           "Must have the same number of vector elements as mask elements!");
-    return getVectorShuffle(VT, dl, N1, N2, MaskElts.data());
-  }
+                           ArrayRef<int> Mask);
 
   /// Return an ISD::BUILD_VECTOR node. The number of elements in VT,
   /// which must be a vector type, must match the number of operands in Ops.
@@ -1221,9 +1215,11 @@ public:
     return DbgInfo->getSDDbgValues(SD);
   }
 
-  /// Transfer SDDbgValues.
+private:
+  /// Transfer SDDbgValues. Called via ReplaceAllUses{OfValue}?With
   void TransferDbgValues(SDValue From, SDValue To);
 
+public:
   /// Return true if there are any SDDbgValue nodes associated
   /// with this SelectionDAG.
   bool hasDebugValues() const { return !DbgInfo->empty(); }
@@ -1382,7 +1378,7 @@ private:
                                void *&InsertPos);
   SDNode *FindModifiedNodeSlot(SDNode *N, ArrayRef<SDValue> Ops,
                                void *&InsertPos);
-  SDNode *UpdadeSDLocOnMergedSDNode(SDNode *N, SDLoc loc);
+  SDNode *UpdadeSDLocOnMergedSDNode(SDNode *N, const SDLoc &loc);
 
   void DeleteNodeNotInCSEMaps(SDNode *N);
   void DeallocateNode(SDNode *N);

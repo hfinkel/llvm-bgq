@@ -17,12 +17,12 @@
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Analysis/VectorUtils.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Analysis/VectorUtils.h"
 using namespace llvm;
 
 #define DEBUG_TYPE "loop-accesses"
@@ -64,6 +64,21 @@ static cl::opt<unsigned>
                    cl::desc("Maximum number of dependences collected by "
                             "loop-access analysis (default = 100)"),
                    cl::init(100));
+
+/// This enables versioning on the strides of symbolically striding memory
+/// accesses in code like the following.
+///   for (i = 0; i < N; ++i)
+///     A[i * Stride1] += B[i * Stride2] ...
+///
+/// Will be roughly translated to
+///    if (Stride1 == 1 && Stride2 == 1) {
+///      for (i = 0; i < N; i+=4)
+///       A[i:i+3] += ...
+///    } else
+///      ...
+static cl::opt<bool> EnableMemAccessVersioning(
+    "enable-mem-access-versioning", cl::init(true), cl::Hidden,
+    cl::desc("Enable symbolic stride memory access versioning"));
 
 /// \brief Enable store-to-load forwarding conflict detection. This option can
 /// be disabled for correctness testing.
@@ -1477,8 +1492,8 @@ bool LoopAccessInfo::canAnalyzeLoop() {
   }
 
   // ScalarEvolution needs to be able to find the exit count.
-  const SCEV *ExitCount = PSE.getBackedgeTakenCount();
-  if (ExitCount == PSE.getSE()->getCouldNotCompute()) {
+  const SCEV *ExitCount = PSE->getBackedgeTakenCount();
+  if (ExitCount == PSE->getSE()->getCouldNotCompute()) {
     emitAnalysis(LoopAccessReport()
                  << "could not determine number of loop iterations");
     DEBUG(dbgs() << "LAA: SCEV could not compute the loop exit count.\n");
@@ -1488,8 +1503,7 @@ bool LoopAccessInfo::canAnalyzeLoop() {
   return true;
 }
 
-void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
-
+void LoopAccessInfo::analyzeLoop() {
   typedef SmallPtrSet<Value*, 16> ValueSet;
 
   // Holds the Load and Store instructions.
@@ -1500,8 +1514,8 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
   unsigned NumReads = 0;
   unsigned NumReadWrites = 0;
 
-  PtrRtChecking.Pointers.clear();
-  PtrRtChecking.Need = false;
+  PtrRtChecking->Pointers.clear();
+  PtrRtChecking->Need = false;
 
   const bool IsAnnotatedParallel = TheLoop->isAnnotatedParallel();
 
@@ -1540,7 +1554,9 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
         }
         NumLoads++;
         Loads.push_back(Ld);
-        DepChecker.addAccess(Ld);
+        DepChecker->addAccess(Ld);
+        if (EnableMemAccessVersioning)
+          collectStridedAccess(Ld);
         continue;
       }
 
@@ -1562,7 +1578,9 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
         }
         NumStores++;
         Stores.push_back(St);
-        DepChecker.addAccess(St);
+        DepChecker->addAccess(St);
+        if (EnableMemAccessVersioning)
+          collectStridedAccess(St);
       }
     } // Next instr.
   } // Next block.
@@ -1580,7 +1598,7 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
 
   MemoryDepChecker::DepCandidates DependentAccesses;
   AccessAnalysis Accesses(TheLoop->getHeader()->getModule()->getDataLayout(),
-                          AA, LI, DependentAccesses, PSE);
+                          AA, LI, DependentAccesses, *PSE);
 
   // Holds the analyzed pointers. We don't want to call GetUnderlyingObjects
   // multiple times on the same object. If the ptr is accessed twice, once
@@ -1629,7 +1647,7 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
     // words may be written to the same address.
     bool IsReadOnlyPtr = false;
     if (Seen.insert(Ptr).second ||
-        !getPtrStride(PSE, Ptr, TheLoop, SymbolicStrides)) {
+        !getPtrStride(*PSE, Ptr, TheLoop, SymbolicStrides)) {
       ++NumReads;
       IsReadOnlyPtr = true;
     }
@@ -1658,7 +1676,7 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
 
   // Find pointers with computable bounds. We are going to use this information
   // to place a runtime bound check.
-  bool CanDoRTIfNeeded = Accesses.canCheckPtrAtRT(PtrRtChecking, PSE.getSE(),
+  bool CanDoRTIfNeeded = Accesses.canCheckPtrAtRT(*PtrRtChecking, PSE->getSE(),
                                                   TheLoop, SymbolicStrides);
   if (!CanDoRTIfNeeded) {
     emitAnalysis(LoopAccessReport() << "cannot identify array bounds");
@@ -1673,21 +1691,21 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
   CanVecMem = true;
   if (Accesses.isDependencyCheckNeeded()) {
     DEBUG(dbgs() << "LAA: Checking memory dependencies\n");
-    CanVecMem = DepChecker.areDepsSafe(
+    CanVecMem = DepChecker->areDepsSafe(
         DependentAccesses, Accesses.getDependenciesToCheck(), SymbolicStrides);
-    MaxSafeDepDistBytes = DepChecker.getMaxSafeDepDistBytes();
+    MaxSafeDepDistBytes = DepChecker->getMaxSafeDepDistBytes();
 
-    if (!CanVecMem && DepChecker.shouldRetryWithRuntimeCheck()) {
+    if (!CanVecMem && DepChecker->shouldRetryWithRuntimeCheck()) {
       DEBUG(dbgs() << "LAA: Retrying with memory checks\n");
 
       // Clear the dependency checks. We assume they are not needed.
-      Accesses.resetDepChecks(DepChecker);
+      Accesses.resetDepChecks(*DepChecker);
 
-      PtrRtChecking.reset();
-      PtrRtChecking.Need = true;
+      PtrRtChecking->reset();
+      PtrRtChecking->Need = true;
 
-      auto *SE = PSE.getSE();
-      CanDoRTIfNeeded = Accesses.canCheckPtrAtRT(PtrRtChecking, SE, TheLoop,
+      auto *SE = PSE->getSE();
+      CanDoRTIfNeeded = Accesses.canCheckPtrAtRT(*PtrRtChecking, SE, TheLoop,
                                                  SymbolicStrides, true);
 
       // Check that we found the bounds for the pointer.
@@ -1705,7 +1723,7 @@ void LoopAccessInfo::analyzeLoop(const ValueToValueMap &SymbolicStrides) {
 
   if (CanVecMem)
     DEBUG(dbgs() << "LAA: No unsafe dependent memory operations in loop.  We"
-                 << (PtrRtChecking.Need ? "" : " don't")
+                 << (PtrRtChecking->Need ? "" : " don't")
                  << " need runtime memory checks.\n");
   else {
     emitAnalysis(
@@ -1733,7 +1751,7 @@ void LoopAccessInfo::emitAnalysis(LoopAccessReport &Message) {
 }
 
 bool LoopAccessInfo::isUniform(Value *V) const {
-  return (PSE.getSE()->isLoopInvariant(PSE.getSE()->getSCEV(V), TheLoop));
+  return (PSE->getSE()->isLoopInvariant(PSE->getSE()->getSCEV(V), TheLoop));
 }
 
 // FIXME: this function is currently a duplicate of the one in
@@ -1814,10 +1832,10 @@ std::pair<Instruction *, Instruction *> LoopAccessInfo::addRuntimeChecks(
     Instruction *Loc,
     const SmallVectorImpl<RuntimePointerChecking::PointerCheck> &PointerChecks)
     const {
-  auto *SE = PSE.getSE();
-  SCEVExpander Exp(*SE, DL, "induction");
+  auto *SE = PSE->getSE();
+  SCEVExpander Exp(*SE, *DL, "induction");
   auto ExpandedChecks =
-      expandBounds(PointerChecks, TheLoop, Loc, SE, Exp, PtrRtChecking);
+      expandBounds(PointerChecks, TheLoop, Loc, SE, Exp, *PtrRtChecking);
 
   LLVMContext &Ctx = Loc->getContext();
   Instruction *FirstInst = nullptr;
@@ -1873,23 +1891,43 @@ std::pair<Instruction *, Instruction *> LoopAccessInfo::addRuntimeChecks(
 
 std::pair<Instruction *, Instruction *>
 LoopAccessInfo::addRuntimeChecks(Instruction *Loc) const {
-  if (!PtrRtChecking.Need)
+  if (!PtrRtChecking->Need)
     return std::make_pair(nullptr, nullptr);
 
-  return addRuntimeChecks(Loc, PtrRtChecking.getChecks());
+  return addRuntimeChecks(Loc, PtrRtChecking->getChecks());
+}
+
+void LoopAccessInfo::collectStridedAccess(Value *MemAccess) {
+  Value *Ptr = nullptr;
+  if (LoadInst *LI = dyn_cast<LoadInst>(MemAccess))
+    Ptr = LI->getPointerOperand();
+  else if (StoreInst *SI = dyn_cast<StoreInst>(MemAccess))
+    Ptr = SI->getPointerOperand();
+  else
+    return;
+
+  Value *Stride = getStrideFromPointer(Ptr, PSE->getSE(), TheLoop);
+  if (!Stride)
+    return;
+
+  DEBUG(dbgs() << "LAA: Found a strided access that we can version");
+  DEBUG(dbgs() << "  Ptr: " << *Ptr << " Stride: " << *Stride << "\n");
+  SymbolicStrides[Ptr] = Stride;
+  StrideSet.insert(Stride);
 }
 
 LoopAccessInfo::LoopAccessInfo(Loop *L, ScalarEvolution *SE,
                                const DataLayout &DL,
                                const TargetLibraryInfo *TLI, AliasAnalysis *AA,
-                               DominatorTree *DT, LoopInfo *LI,
-                               const ValueToValueMap &Strides)
-    : PSE(*SE, *L), PtrRtChecking(SE), DepChecker(PSE, L), TheLoop(L), DL(DL),
-      TLI(TLI), AA(AA), DT(DT), LI(LI), NumLoads(0), NumStores(0),
+                               DominatorTree *DT, LoopInfo *LI)
+    : PSE(llvm::make_unique<PredicatedScalarEvolution>(*SE, *L)),
+      PtrRtChecking(llvm::make_unique<RuntimePointerChecking>(SE)),
+      DepChecker(llvm::make_unique<MemoryDepChecker>(*PSE, L)), TheLoop(L),
+      DL(&DL), TLI(TLI), AA(AA), DT(DT), LI(LI), NumLoads(0), NumStores(0),
       MaxSafeDepDistBytes(-1U), CanVecMem(false),
       StoreToLoopInvariantAddress(false) {
   if (canAnalyzeLoop())
-    analyzeLoop(Strides);
+    analyzeLoop();
 }
 
 void LoopAccessInfo::print(raw_ostream &OS, unsigned Depth) const {
@@ -1898,7 +1936,7 @@ void LoopAccessInfo::print(raw_ostream &OS, unsigned Depth) const {
     if (MaxSafeDepDistBytes != -1U)
       OS << " with a maximum dependence distance of " << MaxSafeDepDistBytes
          << " bytes";
-    if (PtrRtChecking.Need)
+    if (PtrRtChecking->Need)
       OS << " with run-time checks";
     OS << "\n";
   }
@@ -1906,17 +1944,17 @@ void LoopAccessInfo::print(raw_ostream &OS, unsigned Depth) const {
   if (Report)
     OS.indent(Depth) << "Report: " << Report->str() << "\n";
 
-  if (auto *Dependences = DepChecker.getDependences()) {
+  if (auto *Dependences = DepChecker->getDependences()) {
     OS.indent(Depth) << "Dependences:\n";
     for (auto &Dep : *Dependences) {
-      Dep.print(OS, Depth + 2, DepChecker.getMemoryInstructions());
+      Dep.print(OS, Depth + 2, DepChecker->getMemoryInstructions());
       OS << "\n";
     }
   } else
     OS.indent(Depth) << "Too many dependences, not recorded\n";
 
   // List the pair of accesses need run-time checks to prove independence.
-  PtrRtChecking.print(OS, Depth);
+  PtrRtChecking->print(OS, Depth);
   OS << "\n";
 
   OS.indent(Depth) << "Store to invariant address was "
@@ -1924,30 +1962,20 @@ void LoopAccessInfo::print(raw_ostream &OS, unsigned Depth) const {
                    << "found in loop.\n";
 
   OS.indent(Depth) << "SCEV assumptions:\n";
-  PSE.getUnionPredicate().print(OS, Depth);
+  PSE->getUnionPredicate().print(OS, Depth);
 
   OS << "\n";
 
   OS.indent(Depth) << "Expressions re-written:\n";
-  PSE.print(OS, Depth);
+  PSE->print(OS, Depth);
 }
 
-const LoopAccessInfo &
-LoopAccessAnalysis::getInfo(Loop *L, const ValueToValueMap &Strides) {
+const LoopAccessInfo &LoopAccessAnalysis::getInfo(Loop *L) {
   auto &LAI = LoopAccessInfoMap[L];
-
-#ifndef NDEBUG
-  assert((!LAI || LAI->NumSymbolicStrides == Strides.size()) &&
-         "Symbolic strides changed for loop");
-#endif
 
   if (!LAI) {
     const DataLayout &DL = L->getHeader()->getModule()->getDataLayout();
-    LAI =
-        llvm::make_unique<LoopAccessInfo>(L, SE, DL, TLI, AA, DT, LI, Strides);
-#ifndef NDEBUG
-    LAI->NumSymbolicStrides = Strides.size();
-#endif
+    LAI = llvm::make_unique<LoopAccessInfo>(L, SE, DL, TLI, AA, DT, LI);
   }
   return *LAI.get();
 }

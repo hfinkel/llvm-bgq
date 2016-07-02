@@ -15,6 +15,7 @@
 #include "llvm/Bitcode/LLVMBitCodes.h"
 #include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/IR/AutoUpgrade.h"
+#include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -230,8 +231,10 @@ class BitcodeReader : public GVMaterializer {
 
   // When intrinsic functions are encountered which require upgrading they are
   // stored here with their replacement function.
-  typedef DenseMap<Function*, Function*> UpgradedIntrinsicMap;
-  UpgradedIntrinsicMap UpgradedIntrinsics;
+  typedef DenseMap<Function*, Function*> UpdatedIntrinsicMap;
+  UpdatedIntrinsicMap UpgradedIntrinsics;
+  // Intrinsics which were remangled because of types rename
+  UpdatedIntrinsicMap RemangledIntrinsics;
 
   // Map the bitcode's custom MDKind ID to the Module's MDKind ID.
   DenseMap<unsigned, unsigned> MDKindMap;
@@ -281,7 +284,6 @@ class BitcodeReader : public GVMaterializer {
 
 public:
   std::error_code error(BitcodeError E, const Twine &Message);
-  std::error_code error(BitcodeError E);
   std::error_code error(const Twine &Message);
 
   BitcodeReader(MemoryBuffer *Buffer, LLVMContext &Context);
@@ -506,15 +508,10 @@ class ModuleSummaryIndexBitcodeReader {
   std::string SourceFileName;
 
 public:
-  std::error_code error(BitcodeError E, const Twine &Message);
-  std::error_code error(BitcodeError E);
   std::error_code error(const Twine &Message);
 
   ModuleSummaryIndexBitcodeReader(
       MemoryBuffer *Buffer, DiagnosticHandlerFunction DiagnosticHandler,
-      bool CheckGlobalValSummaryPresenceOnly = false);
-  ModuleSummaryIndexBitcodeReader(
-      DiagnosticHandlerFunction DiagnosticHandler,
       bool CheckGlobalValSummaryPresenceOnly = false);
   ~ModuleSummaryIndexBitcodeReader() { freeState(); }
 
@@ -552,26 +549,17 @@ BitcodeDiagnosticInfo::BitcodeDiagnosticInfo(std::error_code EC,
 
 void BitcodeDiagnosticInfo::print(DiagnosticPrinter &DP) const { DP << Msg; }
 
-static std::error_code error(DiagnosticHandlerFunction DiagnosticHandler,
+static std::error_code error(const DiagnosticHandlerFunction &DiagnosticHandler,
                              std::error_code EC, const Twine &Message) {
   BitcodeDiagnosticInfo DI(EC, DS_Error, Message);
   DiagnosticHandler(DI);
   return EC;
 }
 
-static std::error_code error(DiagnosticHandlerFunction DiagnosticHandler,
-                             std::error_code EC) {
-  return error(DiagnosticHandler, EC, EC.message());
-}
-
 static std::error_code error(LLVMContext &Context, std::error_code EC,
                              const Twine &Message) {
   return error([&](const DiagnosticInfo &DI) { Context.diagnose(DI); }, EC,
                Message);
-}
-
-static std::error_code error(LLVMContext &Context, std::error_code EC) {
-  return error(Context, EC, EC.message());
 }
 
 static std::error_code error(LLVMContext &Context, const Twine &Message) {
@@ -596,10 +584,6 @@ std::error_code BitcodeReader::error(const Twine &Message) {
   }
   return ::error(Context, make_error_code(BitcodeError::CorruptedBitcode),
                  Message);
-}
-
-std::error_code BitcodeReader::error(BitcodeError E) {
-  return ::error(Context, make_error_code(E));
 }
 
 BitcodeReader::BitcodeReader(MemoryBuffer *Buffer, LLVMContext &Context)
@@ -2482,7 +2466,7 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       break;
     }
     case bitc::METADATA_SUBPROGRAM: {
-      if (Record.size() != 18 && Record.size() != 19)
+      if (Record.size() < 18 || Record.size() > 20)
         return error("Invalid record");
 
       IsDistinct =
@@ -2490,21 +2474,36 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       // Version 1 has a Function as Record[15].
       // Version 2 has removed Record[15].
       // Version 3 has the Unit as Record[15].
+      // Version 4 added thisAdjustment.
       bool HasUnit = Record[0] >= 2;
-      if (HasUnit && Record.size() != 19)
+      if (HasUnit && Record.size() < 19)
         return error("Invalid record");
       Metadata *CUorFn = getMDOrNull(Record[15]);
-      unsigned Offset = Record.size() == 19 ? 1 : 0;
+      unsigned Offset = Record.size() >= 19 ? 1 : 0;
       bool HasFn = Offset && !HasUnit;
+      bool HasThisAdj = Record.size() >= 20;
       DISubprogram *SP = GET_OR_DISTINCT(
-          DISubprogram,
-          (Context, getDITypeRefOrNull(Record[1]), getMDString(Record[2]),
-           getMDString(Record[3]), getMDOrNull(Record[4]), Record[5],
-           getMDOrNull(Record[6]), Record[7], Record[8], Record[9],
-           getDITypeRefOrNull(Record[10]), Record[11], Record[12], Record[13],
-           Record[14], HasUnit ? CUorFn : nullptr,
-           getMDOrNull(Record[15 + Offset]), getMDOrNull(Record[16 + Offset]),
-           getMDOrNull(Record[17 + Offset])));
+          DISubprogram, (Context,
+                         getDITypeRefOrNull(Record[1]),    // scope
+                         getMDString(Record[2]),           // name
+                         getMDString(Record[3]),           // linkageName
+                         getMDOrNull(Record[4]),           // file
+                         Record[5],                        // line
+                         getMDOrNull(Record[6]),           // type
+                         Record[7],                        // isLocal
+                         Record[8],                        // isDefinition
+                         Record[9],                        // scopeLine
+                         getDITypeRefOrNull(Record[10]),   // containingType
+                         Record[11],                       // virtuality
+                         Record[12],                       // virtualIndex
+                         HasThisAdj ? Record[19] : 0,      // thisAdjustment
+                         Record[13],                       // flags
+                         Record[14],                       // isOptimized
+                         HasUnit ? CUorFn : nullptr,       // unit
+                         getMDOrNull(Record[15 + Offset]), // templateParams
+                         getMDOrNull(Record[16 + Offset]), // declaration
+                         getMDOrNull(Record[17 + Offset])  // variables
+                         ));
       MetadataList.assignValue(SP, NextMetadataNo++);
 
       // Upgrade sp->function mapping to function->sp mapping.
@@ -2692,6 +2691,16 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
               parseMetadataStrings(Record, Blob, NextMetadataNo))
         return EC;
       break;
+    case bitc::METADATA_GLOBAL_DECL_ATTACHMENT: {
+      if (Record.size() % 2 == 0)
+        return error("Invalid record");
+      unsigned ValueID = Record[0];
+      if (ValueID >= ValueList.size())
+        return error("Invalid record");
+      if (auto *GO = dyn_cast<GlobalObject>(ValueList[ValueID]))
+        parseGlobalObjectAttachment(*GO, ArrayRef<uint64_t>(Record).slice(1));
+      break;
+    }
     case bitc::METADATA_KIND: {
       // Support older bitcode files that had METADATA_KIND records in a
       // block with METADATA_BLOCK_ID.
@@ -3434,6 +3443,11 @@ std::error_code BitcodeReader::globalCleanup() {
     Function *NewFn;
     if (UpgradeIntrinsicFunction(&F, NewFn))
       UpgradedIntrinsics[&F] = NewFn;
+    else if (auto Remangled = Intrinsic::remangleIntrinsicFunction(&F))
+      // Some types could be renamed during loading if several modules are
+      // loaded in the same LLVMContext (LTO scenario). In this case we should
+      // remangle intrinsics names as well.
+      RemangledIntrinsics[&F] = Remangled.getValue();
   }
 
   // Look for global variables which need to be renamed.
@@ -3838,16 +3852,6 @@ std::error_code BitcodeReader::parseModule(uint64_t ResumeBit,
         NewGV->setComdat(reinterpret_cast<Comdat *>(1));
       }
 
-      break;
-    }
-    case bitc::MODULE_CODE_GLOBALVAR_ATTACHMENT: {
-      if (Record.size() % 2 == 0)
-        return error("Invalid record");
-      unsigned ValueID = Record[0];
-      if (ValueID >= ValueList.size())
-        return error("Invalid record");
-      if (auto *GV = dyn_cast<GlobalVariable>(ValueList[ValueID]))
-        parseGlobalObjectAttachment(*GV, ArrayRef<uint64_t>(Record).slice(1));
       break;
     }
     // FUNCTION:  [type, callingconv, isproto, linkage, paramattr,
@@ -5620,6 +5624,13 @@ std::error_code BitcodeReader::materialize(GlobalValue *GV) {
     }
   }
 
+  // Update calls to the remangled intrinsics
+  for (auto &I : RemangledIntrinsics)
+    for (auto UI = I.first->materialized_user_begin(), UE = I.first->user_end();
+         UI != UE;)
+      // Don't expect any other users than call sites
+      CallSite(*UI++).setCalledFunction(I.second);
+
   // Finish fn->subprogram upgrade for materialized functions.
   if (DISubprogram *SP = FunctionsWithSPs.lookup(F))
     F->setSubprogram(SP);
@@ -5673,6 +5684,12 @@ std::error_code BitcodeReader::materializeModule() {
     I.first->eraseFromParent();
   }
   UpgradedIntrinsics.clear();
+  // Do the same for remangled intrinsics
+  for (auto &I : RemangledIntrinsics) {
+    I.first->replaceAllUsesWith(I.second);
+    I.first->eraseFromParent();
+  }
+  RemangledIntrinsics.clear();
 
   UpgradeDebugInfo(*TheModule);
 
@@ -5737,30 +5754,15 @@ BitcodeReader::initLazyStream(std::unique_ptr<DataStreamer> Streamer) {
   return std::error_code();
 }
 
-std::error_code ModuleSummaryIndexBitcodeReader::error(BitcodeError E,
-                                                       const Twine &Message) {
-  return ::error(DiagnosticHandler, make_error_code(E), Message);
-}
-
 std::error_code ModuleSummaryIndexBitcodeReader::error(const Twine &Message) {
   return ::error(DiagnosticHandler,
                  make_error_code(BitcodeError::CorruptedBitcode), Message);
-}
-
-std::error_code ModuleSummaryIndexBitcodeReader::error(BitcodeError E) {
-  return ::error(DiagnosticHandler, make_error_code(E));
 }
 
 ModuleSummaryIndexBitcodeReader::ModuleSummaryIndexBitcodeReader(
     MemoryBuffer *Buffer, DiagnosticHandlerFunction DiagnosticHandler,
     bool CheckGlobalValSummaryPresenceOnly)
     : DiagnosticHandler(std::move(DiagnosticHandler)), Buffer(Buffer),
-      CheckGlobalValSummaryPresenceOnly(CheckGlobalValSummaryPresenceOnly) {}
-
-ModuleSummaryIndexBitcodeReader::ModuleSummaryIndexBitcodeReader(
-    DiagnosticHandlerFunction DiagnosticHandler,
-    bool CheckGlobalValSummaryPresenceOnly)
-    : DiagnosticHandler(std::move(DiagnosticHandler)), Buffer(nullptr),
       CheckGlobalValSummaryPresenceOnly(CheckGlobalValSummaryPresenceOnly) {}
 
 void ModuleSummaryIndexBitcodeReader::freeState() { Buffer = nullptr; }
@@ -6555,9 +6557,9 @@ std::string llvm::getBitcodeProducerString(MemoryBufferRef Buffer,
 }
 
 // Parse the specified bitcode buffer, returning the function info index.
-ErrorOr<std::unique_ptr<ModuleSummaryIndex>>
-llvm::getModuleSummaryIndex(MemoryBufferRef Buffer,
-                            DiagnosticHandlerFunction DiagnosticHandler) {
+ErrorOr<std::unique_ptr<ModuleSummaryIndex>> llvm::getModuleSummaryIndex(
+    MemoryBufferRef Buffer,
+    const DiagnosticHandlerFunction &DiagnosticHandler) {
   std::unique_ptr<MemoryBuffer> Buf = MemoryBuffer::getMemBuffer(Buffer, false);
   ModuleSummaryIndexBitcodeReader R(Buf.get(), DiagnosticHandler);
 
@@ -6576,8 +6578,9 @@ llvm::getModuleSummaryIndex(MemoryBufferRef Buffer,
 }
 
 // Check if the given bitcode buffer contains a global value summary block.
-bool llvm::hasGlobalValueSummary(MemoryBufferRef Buffer,
-                                 DiagnosticHandlerFunction DiagnosticHandler) {
+bool llvm::hasGlobalValueSummary(
+    MemoryBufferRef Buffer,
+    const DiagnosticHandlerFunction &DiagnosticHandler) {
   std::unique_ptr<MemoryBuffer> Buf = MemoryBuffer::getMemBuffer(Buffer, false);
   ModuleSummaryIndexBitcodeReader R(Buf.get(), DiagnosticHandler, true);
 

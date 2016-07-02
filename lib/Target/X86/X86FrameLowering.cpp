@@ -1281,7 +1281,7 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
   }
 
   while (MBBI != MBB.end() && MBBI->getFlag(MachineInstr::FrameSetup)) {
-    const MachineInstr *FrameInstr = &*MBBI;
+    const MachineInstr &FrameInstr = *MBBI;
     ++MBBI;
 
     if (NeedsWinCFI) {
@@ -1433,12 +1433,10 @@ static bool isFuncletReturnInstr(MachineInstr *MI) {
 unsigned
 X86FrameLowering::getPSPSlotOffsetFromSP(const MachineFunction &MF) const {
   const WinEHFuncInfo &Info = *MF.getWinEHFuncInfo();
-  // getFrameIndexReferenceFromSP has an out ref parameter for the stack
-  // pointer register; pass a dummy that we ignore
   unsigned SPReg;
-  int Offset = *getFrameIndexReferenceFromSP(MF, Info.PSPSymFrameIdx, SPReg,
-                                             /*AllowSPAdjustment*/ true);
-  assert(Offset >= 0);
+  int Offset = getFrameIndexReferencePreferSP(MF, Info.PSPSymFrameIdx, SPReg,
+                                              /*IgnoreSPUpdates*/ true);
+  assert(Offset >= 0 && SPReg == TRI->getStackRegister());
   return static_cast<unsigned>(Offset);
 }
 
@@ -1722,11 +1720,11 @@ int X86FrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
   return Offset + FPDelta;
 }
 
-// Simplified from getFrameIndexReference keeping only StackPointer cases
-Optional<int>
-X86FrameLowering::getFrameIndexReferenceFromSP(const MachineFunction &MF,
-                                               int FI, unsigned &FrameReg,
-                                               bool AllowSPAdjustment) const {
+int
+X86FrameLowering::getFrameIndexReferencePreferSP(const MachineFunction &MF,
+                                                 int FI, unsigned &FrameReg,
+                                                 bool IgnoreSPUpdates) const {
+
   const MachineFrameInfo *MFI = MF.getFrameInfo();
   // Does not include any dynamic realign.
   const uint64_t StackSize = MFI->getStackSize();
@@ -1765,14 +1763,14 @@ X86FrameLowering::getFrameIndexReferenceFromSP(const MachineFunction &MF,
 
   if (MFI->isFixedObjectIndex(FI) && TRI->needsStackRealignment(MF) &&
       !STI.isTargetWin64())
-    return None;
+    return getFrameIndexReference(MF, FI, FrameReg);
 
   // If !hasReservedCallFrame the function might have SP adjustement in the
   // body.  So, even though the offset is statically known, it depends on where
   // we are in the function.
   const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
-  if (!AllowSPAdjustment && !TFI->hasReservedCallFrame(MF))
-    return None;
+  if (!IgnoreSPUpdates && !TFI->hasReservedCallFrame(MF))
+    return getFrameIndexReference(MF, FI, FrameReg);
 
   // We don't handle tail calls, and shouldn't be seeing them either.
   assert(MF.getInfo<X86MachineFunctionInfo>()->getTCReturnAddrDelta() >= 0 &&
@@ -1895,17 +1893,29 @@ bool X86FrameLowering::spillCalleeSavedRegisters(
     if (!X86::GR64RegClass.contains(Reg) && !X86::GR32RegClass.contains(Reg))
       continue;
 
-    bool isLiveIn = MF.getRegInfo().isLiveIn(Reg);
+    const MachineRegisterInfo &MRI = MF.getRegInfo();
+    bool isLiveIn = MRI.isLiveIn(Reg);
     if (!isLiveIn)
       MBB.addLiveIn(Reg);
+
+    // Decide whether we can add a kill flag to the use.
+    bool CanKill = !isLiveIn;
+    // Check if any subregister is live-in
+    if (CanKill) {
+      for (MCRegAliasIterator AReg(Reg, TRI, false); AReg.isValid(); ++AReg) {
+        if (MRI.isLiveIn(*AReg)) {
+          CanKill = false;
+          break;
+        }
+      }
+    }
 
     // Do not set a kill flag on values that are also marked as live-in. This
     // happens with the @llvm-returnaddress intrinsic and with arguments
     // passed in callee saved registers.
     // Omitting the kill flags is conservatively correct even if the live-in
     // is not used after all.
-    bool isKill = !isLiveIn;
-    BuildMI(MBB, MI, DL, TII.get(Opc)).addReg(Reg, getKillRegState(isKill))
+    BuildMI(MBB, MI, DL, TII.get(Opc)).addReg(Reg, getKillRegState(CanKill))
       .setMIFlag(MachineInstr::FrameSetup);
   }
 
@@ -2300,6 +2310,28 @@ void X86FrameLowering::adjustForSegmentedStacks(
 #endif
 }
 
+/// Lookup an ERTS parameter in the !hipe.literals named metadata node.
+/// HiPE provides Erlang Runtime System-internal parameters, such as PCB offsets
+/// to fields it needs, through a named metadata node "hipe.literals" containing
+/// name-value pairs.
+static unsigned getHiPELiteral(
+    NamedMDNode *HiPELiteralsMD, const StringRef LiteralName) {
+  for (int i = 0, e = HiPELiteralsMD->getNumOperands(); i != e; ++i) {
+    MDNode *Node = HiPELiteralsMD->getOperand(i);
+    if (Node->getNumOperands() != 2) continue;
+    MDString *NodeName = dyn_cast<MDString>(Node->getOperand(0));
+    ValueAsMetadata *NodeVal = dyn_cast<ValueAsMetadata>(Node->getOperand(1));
+    if (!NodeName || !NodeVal) continue;
+    ConstantInt *ValConst = dyn_cast_or_null<ConstantInt>(NodeVal->getValue());
+    if (ValConst && NodeName->getString() == LiteralName) {
+      return ValConst->getZExtValue();
+    }
+  }
+
+  report_fatal_error("HiPE literal " + LiteralName
+                     + " required but not provided");
+}
+
 /// Erlang programs may need a special prologue to handle the stack size they
 /// might need at runtime. That is because Erlang/OTP does not implement a C
 /// stack but uses a custom implementation of hybrid stack/heap architecture.
@@ -2325,7 +2357,14 @@ void X86FrameLowering::adjustForHiPEPrologue(
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
 
   // HiPE-specific values
-  const unsigned HipeLeafWords = 24;
+  NamedMDNode *HiPELiteralsMD = MF.getMMI().getModule()
+    ->getNamedMetadata("hipe.literals");
+  if (!HiPELiteralsMD)
+    report_fatal_error(
+        "Can't generate HiPE prologue without runtime parameters");
+  const unsigned HipeLeafWords
+    = getHiPELiteral(HiPELiteralsMD,
+                     Is64Bit ? "AMD64_LEAF_WORDS" : "X86_LEAF_WORDS");
   const unsigned CCRegisteredArgs = Is64Bit ? 6 : 5;
   const unsigned Guaranteed = HipeLeafWords * SlotSize;
   unsigned CallerStkArity = MF.getFunction()->arg_size() > CCRegisteredArgs ?
@@ -2397,20 +2436,19 @@ void X86FrameLowering::adjustForHiPEPrologue(
 
     unsigned ScratchReg, SPReg, PReg, SPLimitOffset;
     unsigned LEAop, CMPop, CALLop;
+    SPLimitOffset = getHiPELiteral(HiPELiteralsMD, "P_NSP_LIMIT");
     if (Is64Bit) {
       SPReg = X86::RSP;
       PReg  = X86::RBP;
       LEAop = X86::LEA64r;
       CMPop = X86::CMP64rm;
       CALLop = X86::CALL64pcrel32;
-      SPLimitOffset = 0x90;
     } else {
       SPReg = X86::ESP;
       PReg  = X86::EBP;
       LEAop = X86::LEA32r;
       CMPop = X86::CMP32rm;
       CALLop = X86::CALLpcrel32;
-      SPLimitOffset = 0x4c;
     }
 
     ScratchReg = GetScratchRegister(Is64Bit, IsLP64, MF, true);
@@ -2832,6 +2870,8 @@ void X86FrameLowering::orderFrameObjects(
   // Count the number of uses for each object.
   for (auto &MBB : MF) {
     for (auto &MI : MBB) {
+      if (MI.isDebugValue())
+        continue;
       for (const MachineOperand &MO : MI.operands()) {
         // Check to see if it's a local stack symbol.
         if (!MO.isFI())

@@ -63,8 +63,7 @@ namespace {
   public:
     static char ID;
     MipsLongBranch(TargetMachine &tm)
-        : MachineFunctionPass(ID), TM(tm),
-          IsPIC(TM.getRelocationModel() == Reloc::PIC_),
+        : MachineFunctionPass(ID), TM(tm), IsPIC(TM.isPositionIndependent()),
           ABI(static_cast<const MipsTargetMachine &>(TM).getABI()) {}
 
     const char *getPassName() const override {
@@ -187,9 +186,7 @@ void MipsLongBranch::initMBBInfo() {
     ReverseIter Br = getNonDebugInstr(MBB->rbegin(), End);
 
     if ((Br != End) && !Br->isIndirectBranch() &&
-        (Br->isConditionalBranch() ||
-         (Br->isUnconditionalBranch() &&
-          TM.getRelocationModel() == Reloc::PIC_)))
+        (Br->isConditionalBranch() || (Br->isUnconditionalBranch() && IsPIC)))
       MBBInfos[I].Br = (++Br).base();
   }
 }
@@ -335,23 +332,26 @@ void MipsLongBranch::expandToLongBranch(MBBInfo &I) {
       BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::LW), Mips::RA)
         .addReg(Mips::SP).addImm(0);
 
-      if (!Subtarget.isTargetNaCl()) {
-        MIBundleBuilder(*BalTgtMBB, Pos)
-          .append(BuildMI(*MF, DL, TII->get(Mips::JR)).addReg(Mips::AT))
-          .append(BuildMI(*MF, DL, TII->get(Mips::ADDiu), Mips::SP)
-                  .addReg(Mips::SP).addImm(8));
-      } else {
-        // In NaCl, modifying the sp is not allowed in branch delay slot.
+      // In NaCl, modifying the sp is not allowed in branch delay slot.
+      if (Subtarget.isTargetNaCl())
         BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::ADDiu), Mips::SP)
           .addReg(Mips::SP).addImm(8);
 
-        MIBundleBuilder(*BalTgtMBB, Pos)
-          .append(BuildMI(*MF, DL, TII->get(Mips::JR)).addReg(Mips::AT))
-          .append(BuildMI(*MF, DL, TII->get(Mips::NOP)));
+      if (Subtarget.hasMips32r6())
+        BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::JALR))
+          .addReg(Mips::ZERO).addReg(Mips::AT);
+      else
+        BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::JR)).addReg(Mips::AT);
 
+      if (Subtarget.isTargetNaCl()) {
+        BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::NOP));
         // Bundle-align the target of indirect branch JR.
         TgtMBB->setAlignment(MIPS_NACL_BUNDLE_ALIGN);
-      }
+      } else
+        BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::ADDiu), Mips::SP)
+          .addReg(Mips::SP).addImm(8);
+
+      BalTgtMBB->rbegin()->bundleWithPred();
     } else {
       // $longbr:
       //  daddiu $sp, $sp, -16
@@ -410,10 +410,15 @@ void MipsLongBranch::expandToLongBranch(MBBInfo &I) {
       BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::LD), Mips::RA_64)
         .addReg(Mips::SP_64).addImm(0);
 
-      MIBundleBuilder(*BalTgtMBB, Pos)
-        .append(BuildMI(*MF, DL, TII->get(Mips::JR64)).addReg(Mips::AT_64))
-        .append(BuildMI(*MF, DL, TII->get(Mips::DADDiu), Mips::SP_64)
-                .addReg(Mips::SP_64).addImm(16));
+      if (Subtarget.hasMips64r6())
+        BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::JALR64))
+          .addReg(Mips::ZERO_64).addReg(Mips::AT_64);
+      else
+        BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::JR64)).addReg(Mips::AT_64);
+
+      BuildMI(*BalTgtMBB, Pos, DL, TII->get(Mips::DADDiu), Mips::SP_64)
+        .addReg(Mips::SP_64).addImm(16);
+      BalTgtMBB->rbegin()->bundleWithPred();
     }
 
     assert(LongBrMBB->size() + BalTgtMBB->size() == LongBranchSeqSize);
@@ -463,8 +468,7 @@ bool MipsLongBranch::runOnMachineFunction(MachineFunction &F) {
 
   if (STI.inMips16Mode() || !STI.enableLongBranchPass())
     return false;
-  if ((TM.getRelocationModel() == Reloc::PIC_) &&
-      static_cast<const MipsTargetMachine &>(TM).getABI().IsO32() &&
+  if (IsPIC && static_cast<const MipsTargetMachine &>(TM).getABI().IsO32() &&
       F.getInfo<MipsFunctionInfo>()->globalBaseRegSet())
     emitGPDisp(F, TII);
 
@@ -512,7 +516,7 @@ bool MipsLongBranch::runOnMachineFunction(MachineFunction &F) {
     return true;
 
   // Compute basic block addresses.
-  if (TM.getRelocationModel() == Reloc::PIC_) {
+  if (IsPIC) {
     uint64_t Address = 0;
 
     for (I = MBBInfos.begin(); I != E; Address += I->Size, ++I)

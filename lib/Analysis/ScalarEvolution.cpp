@@ -5485,8 +5485,8 @@ void ScalarEvolution::forgetLoop(const Loop *L) {
 
   // Forget all contained loops too, to avoid dangling entries in the
   // ValuesAtScopes map.
-  for (Loop::iterator I = L->begin(), E = L->end(); I != E; ++I)
-    forgetLoop(*I);
+  for (Loop *I : *L)
+    forgetLoop(I);
 
   LoopHasNoAbnormalExits.erase(L);
 }
@@ -5948,11 +5948,6 @@ ScalarEvolution::computeExitLimitFromICmp(const Loop *L,
         return ItCnt;
     }
 
-  ExitLimit ShiftEL = computeShiftCompareExitLimit(
-      ExitCond->getOperand(0), ExitCond->getOperand(1), L, Cond);
-  if (ShiftEL.hasAnyInfo())
-    return ShiftEL;
-
   const SCEV *LHS = getSCEV(ExitCond->getOperand(0));
   const SCEV *RHS = getSCEV(ExitCond->getOperand(1));
 
@@ -6018,7 +6013,15 @@ ScalarEvolution::computeExitLimitFromICmp(const Loop *L,
   default:
     break;
   }
-  return computeExitCountExhaustively(L, ExitCond, !L->contains(TBB));
+
+  auto *ExhaustiveCount =
+      computeExitCountExhaustively(L, ExitCond, !L->contains(TBB));
+
+  if (!isa<SCEVCouldNotCompute>(ExhaustiveCount))
+    return ExhaustiveCount;
+
+  return computeShiftCompareExitLimit(ExitCond->getOperand(0),
+                                      ExitCond->getOperand(1), L, Cond);
 }
 
 ScalarEvolution::ExitLimit
@@ -8668,18 +8671,8 @@ ScalarEvolution::howManyLessThans(const SCEV *LHS, const SCEV *RHS,
                                       : ICmpInst::ICMP_ULT;
   const SCEV *Start = IV->getStart();
   const SCEV *End = RHS;
-  if (!isLoopEntryGuardedByCond(L, Cond, getMinusSCEV(Start, Stride), RHS)) {
-    const SCEV *Diff = getMinusSCEV(RHS, Start);
-    // If we have NoWrap set, then we can assume that the increment won't
-    // overflow, in which case if RHS - Start is a constant, we don't need to
-    // do a max operation since we can just figure it out statically
-    if (NoWrap && isa<SCEVConstant>(Diff)) {
-      if (cast<SCEVConstant>(Diff)->getAPInt().isNegative())
-        End = Start;
-    } else
-      End = IsSigned ? getSMaxExpr(RHS, Start)
-                     : getUMaxExpr(RHS, Start);
-  }
+  if (!isLoopEntryGuardedByCond(L, Cond, getMinusSCEV(Start, Stride), RHS))
+    End = IsSigned ? getSMaxExpr(RHS, Start) : getUMaxExpr(RHS, Start);
 
   const SCEV *BECount = computeBECount(getMinusSCEV(End, Start), Stride, false);
 
@@ -8754,18 +8747,8 @@ ScalarEvolution::howManyGreaterThans(const SCEV *LHS, const SCEV *RHS,
 
   const SCEV *Start = IV->getStart();
   const SCEV *End = RHS;
-  if (!isLoopEntryGuardedByCond(L, Cond, getAddExpr(Start, Stride), RHS)) {
-    const SCEV *Diff = getMinusSCEV(RHS, Start);
-    // If we have NoWrap set, then we can assume that the increment won't
-    // overflow, in which case if RHS - Start is a constant, we don't need to
-    // do a max operation since we can just figure it out statically
-    if (NoWrap && isa<SCEVConstant>(Diff)) {
-      if (!cast<SCEVConstant>(Diff)->getAPInt().isNegative())
-        End = Start;
-    } else
-      End = IsSigned ? getSMinExpr(RHS, Start)
-                     : getUMinExpr(RHS, Start);
-  }
+  if (!isLoopEntryGuardedByCond(L, Cond, getAddExpr(Start, Stride), RHS))
+    End = IsSigned ? getSMinExpr(RHS, Start) : getUMinExpr(RHS, Start);
 
   const SCEV *BECount = computeBECount(getMinusSCEV(Start, End), Stride, false);
 
@@ -9554,8 +9537,8 @@ bool ScalarEvolution::hasLoopInvariantBackedgeTakenCount(const Loop *L) {
 static void PrintLoopInfo(raw_ostream &OS, ScalarEvolution *SE,
                           const Loop *L) {
   // Print all inner loops first
-  for (Loop::iterator I = L->begin(), E = L->end(); I != E; ++I)
-    PrintLoopInfo(OS, SE, *I);
+  for (Loop *I : *L)
+    PrintLoopInfo(OS, SE, I);
 
   OS << "Loop ";
   L->getHeader()->printAsOperand(OS, /*PrintType=*/false);
@@ -9696,8 +9679,8 @@ void ScalarEvolution::print(raw_ostream &OS) const {
   OS << "Determining loop execution counts for: ";
   F.printAsOperand(OS, /*PrintType=*/false);
   OS << "\n";
-  for (LoopInfo::iterator I = LI.begin(), E = LI.end(); I != E; ++I)
-    PrintLoopInfo(OS, &SE, *I);
+  for (Loop *I : LI)
+    PrintLoopInfo(OS, &SE, I);
 }
 
 ScalarEvolution::LoopDisposition
@@ -10449,8 +10432,8 @@ PredicatedScalarEvolution::PredicatedScalarEvolution(
     const PredicatedScalarEvolution &Init)
     : RewriteMap(Init.RewriteMap), SE(Init.SE), L(Init.L), Preds(Init.Preds),
       Generation(Init.Generation), BackedgeCount(Init.BackedgeCount) {
-  for (auto I = Init.FlagsMap.begin(), E = Init.FlagsMap.end(); I != E; ++I)
-    FlagsMap.insert(*I);
+  for (const auto &I : Init.FlagsMap)
+    FlagsMap.insert(I);
 }
 
 void PredicatedScalarEvolution::print(raw_ostream &OS, unsigned Depth) const {

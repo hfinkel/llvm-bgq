@@ -10,13 +10,13 @@
 ; not just directly into the vector component?
 
 ; GCN-LABEL: {{^}}insertelement_v4f32_0:
-; GCN: s_load_dwordx4 s{{\[}}[[LOW_REG:[0-9]+]]:
+; GCN: s_load_dwordx4
 ; GCN-DAG: v_mov_b32_e32 v{{[0-9]+}}, s{{[0-9]+}}
 ; GCN-DAG: v_mov_b32_e32 v{{[0-9]+}}, s{{[0-9]+}}
 ; GCN-DAG: v_mov_b32_e32 v{{[0-9]+}}, s{{[0-9]+}}
 ; GCN-DAG: v_mov_b32_e32 v{{[0-9]+}}, s{{[0-9]+}}
 ; GCN-DAG: v_mov_b32_e32 [[CONSTREG:v[0-9]+]], 0x40a00000
-; GCN-DAG: v_mov_b32_e32 v[[LOW_REG]], [[CONSTREG]]
+; GCN-DAG: v_mov_b32_e32 v[[LOW_REG:[0-9]+]], [[CONSTREG]]
 ; GCN: buffer_store_dwordx4 v{{\[}}[[LOW_REG]]:
 define void @insertelement_v4f32_0(<4 x float> addrspace(1)* %out, <4 x float> %a) nounwind {
   %vecins = insertelement <4 x float> %a, float 5.000000e+00, i32 0
@@ -208,10 +208,7 @@ define void @dynamic_insertelement_v3i16(<3 x i16> addrspace(1)* %out, <3 x i16>
 ; GCN: buffer_load_ushort
 ; GCN: buffer_load_ushort
 
-; GCN: buffer_store_short v{{[0-9]+}}, off
-; GCN: buffer_store_short v{{[0-9]+}}, off
-; GCN: buffer_store_short v{{[0-9]+}}, off
-; GCN: buffer_store_short v{{[0-9]+}}, off
+; GCN: buffer_store_dwordx2 v{{\[[0-9]+:[0-9]+\]}}, off
 define void @dynamic_insertelement_v4i16(<4 x i16> addrspace(1)* %out, <4 x i16> %a, i32 %b) nounwind {
   %vecins = insertelement <4 x i16> %a, i16 5, i32 %b
   store <4 x i16> %vecins, <4 x i16> addrspace(1)* %out, align 8
@@ -230,8 +227,7 @@ define void @dynamic_insertelement_v4i16(<4 x i16> addrspace(1)* %out, <4 x i16>
 ; GCN: buffer_load_ubyte
 ; GCN: buffer_load_ubyte
 
-; GCN: buffer_store_byte v{{[0-9]+}}, off
-; GCN: buffer_store_byte v{{[0-9]+}}, off
+; GCN: buffer_store_short v{{[0-9]+}}, off
 define void @dynamic_insertelement_v2i8(<2 x i8> addrspace(1)* %out, <2 x i8> %a, i32 %b) nounwind {
   %vecins = insertelement <2 x i8> %a, i8 5, i32 %b
   store <2 x i8> %vecins, <2 x i8> addrspace(1)* %out, align 8
@@ -279,10 +275,7 @@ define void @dynamic_insertelement_v3i8(<3 x i8> addrspace(1)* %out, <3 x i8> %a
 ; GCN: buffer_load_ubyte
 ; GCN: buffer_load_ubyte
 
-; GCN: buffer_store_byte v{{[0-9]+}}, off
-; GCN: buffer_store_byte v{{[0-9]+}}, off
-; GCN: buffer_store_byte v{{[0-9]+}}, off
-; GCN: buffer_store_byte v{{[0-9]+}}, off
+; GCN: buffer_store_dword v{{[0-9]+}}, off
 define void @dynamic_insertelement_v4i8(<4 x i8> addrspace(1)* %out, <4 x i8> %a, i32 %b) nounwind {
   %vecins = insertelement <4 x i8> %a, i8 5, i32 %b
   store <4 x i8> %vecins, <4 x i8> addrspace(1)* %out, align 4
