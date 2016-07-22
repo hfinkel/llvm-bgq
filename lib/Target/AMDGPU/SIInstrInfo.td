@@ -624,8 +624,7 @@ def SMRDBufferImm   : ComplexPattern<i32, 1, "SelectSMRDBufferImm">;
 def SMRDBufferImm32 : ComplexPattern<i32, 1, "SelectSMRDBufferImm32">;
 def SMRDBufferSgpr  : ComplexPattern<i32, 1, "SelectSMRDBufferSgpr">;
 
-def MOVRELSOffset : ComplexPattern<i32, 2, "selectMOVRELSOffset">;
-def MOVRELDOffset : ComplexPattern<i32, 2, "selectMOVRELDOffset">;
+def MOVRELOffset : ComplexPattern<i32, 2, "SelectMOVRELOffset">;
 
 def VOP3Mods0 : ComplexPattern<untyped, 4, "SelectVOP3Mods0">;
 def VOP3NoMods0 : ComplexPattern<untyped, 4, "SelectVOP3NoMods0">;
@@ -1501,6 +1500,41 @@ def VOP_I32_F32_F32 : VOPProfile <[i32, f32, f32, untyped]>;
 def VOP_I32_F32_I32 : VOPProfile <[i32, f32, i32, untyped]>;
 def VOP_I32_I32_I32 : VOPProfile <[i32, i32, i32, untyped]>;
 
+// Restrict src0 to be VGPR
+def VOP_I32_VI32_NO_EXT : VOPProfile<[i32, i32, untyped, untyped]> {
+  let Src0RC32 = VRegSrc_32;
+  let Src0RC64 = VRegSrc_32;
+
+  let HasExt = 0;
+}
+
+// Special case because there are no true output operands.  Hack vdst
+// to be a src operand. The custom inserter must add a tied implicit
+// def and use of the super register since there seems to be no way to
+// add an implicit def of a virtual register in tablegen.
+def VOP_MOVRELD : VOPProfile<[untyped, i32, untyped, untyped]> {
+  let Src0RC32 = VOPDstOperand<VGPR_32>;
+  let Src0RC64 = VOPDstOperand<VGPR_32>;
+
+  let Outs = (outs);
+  let Ins32 = (ins Src0RC32:$vdst, VSrc_32:$src0);
+  let Ins64 = (ins Src0RC64:$vdst, VSrc_32:$src0);
+
+  let InsDPP = (ins Src0RC32:$vdst, Src0RC32:$src0, dpp_ctrl:$dpp_ctrl, row_mask:$row_mask,
+                    bank_mask:$bank_mask, bound_ctrl:$bound_ctrl);
+  let InsSDWA = (ins Src0RC32:$vdst, IntInputMods:$src0_imodifiers, VCSrc_32:$src0,
+                     clampmod:$clamp, dst_sel:$dst_sel, dst_unused:$dst_unused,
+                     src0_sel:$src0_sel);
+
+  let Asm32 = getAsm32<1, 1>.ret;
+  let Asm64 = getAsm64<1, 1, 0>.ret;
+  let AsmDPP = getAsmDPP<1, 1, 0>.ret;
+  let AsmSDWA = getAsmSDWA<1, 1, 0>.ret;
+
+  let HasExt = 0;
+  let HasDst = 0;
+}
+
 // Write out to vcc or arbitrary SGPR.
 def VOP2b_I32_I1_I32_I32 : VOPProfile<[i32, i32, i32, untyped]> {
   let Asm32 = "$vdst, vcc, $src0, $src1";
@@ -2304,13 +2338,14 @@ multiclass VOPC_m <vopc op, dag ins, string op_asm, list<dag> pattern,
            VOP2_REV<revOpName#"_e32", !eq(revOpName, opName)> {
     let Defs = !if(DefExec, [VCC, EXEC], [VCC]);
     let SchedRW = sched;
+    let isConvergent = DefExec;
   }
 
   let AssemblerPredicates = [isSICI] in {
     def _si : VOPC<op.SI, ins, asm, []>,
               SIMCInstr <opName#"_e32", SIEncodingFamily.SI> {
       let Defs = !if(DefExec, [VCC, EXEC], [VCC]);
-      let hasSideEffects = DefExec;
+      let isConvergent = DefExec;
       let SchedRW = sched;
       let DecoderNamespace = "SICI";
       let DisableDecoder = DisableSIDecoder;
@@ -2322,7 +2357,7 @@ multiclass VOPC_m <vopc op, dag ins, string op_asm, list<dag> pattern,
     def _vi : VOPC<op.VI, ins, asm, []>,
               SIMCInstr <opName#"_e32", SIEncodingFamily.VI> {
       let Defs = !if(DefExec, [VCC, EXEC], [VCC]);
-      let hasSideEffects = DefExec;
+      let isConvergent = DefExec;
       let SchedRW = sched;
       let DecoderNamespace = "VI";
       let DisableDecoder = DisableVIDecoder;
@@ -3557,8 +3592,8 @@ class MIMG_Gather_Helper <bits<7> op, string asm,
   // 1=red, 2=green, 4=blue, 8=alpha. (e.g. 1 returns
   // (red,red,red,red) etc.) The ISA document doesn't mention
   // this.
-  // Therefore, disable all code which updates DMASK by setting these two:
-  let MIMG = 0;
+  // Therefore, disable all code which updates DMASK by setting this:
+  let Gather4 = 1;
   let hasPostISelHook = 0;
   let WQM = wqm;
 
