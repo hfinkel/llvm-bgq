@@ -80,11 +80,11 @@ private:
 
   bool shouldSkip(MachineBasicBlock *From, MachineBasicBlock *To);
 
-  void Skip(MachineInstr &From, MachineOperand &To);
+  MachineInstr *Skip(MachineInstr &From, MachineOperand &To);
   bool skipIfDead(MachineInstr &MI, MachineBasicBlock &NextBB);
 
   void If(MachineInstr &MI);
-  void Else(MachineInstr &MI, bool ExecModified);
+  void Else(MachineInstr &MI);
   void Break(MachineInstr &MI);
   void IfBreak(MachineInstr &MI);
   void ElseBreak(MachineInstr &MI);
@@ -182,14 +182,15 @@ bool SILowerControlFlow::shouldSkip(MachineBasicBlock *From,
   return false;
 }
 
-void SILowerControlFlow::Skip(MachineInstr &From, MachineOperand &To) {
-
+MachineInstr *SILowerControlFlow::Skip(MachineInstr &From, MachineOperand &To) {
   if (!shouldSkip(*From.getParent()->succ_begin(), To.getMBB()))
-    return;
+    return nullptr;
 
-  DebugLoc DL = From.getDebugLoc();
-  BuildMI(*From.getParent(), &From, DL, TII->get(AMDGPU::S_CBRANCH_EXECZ))
+  const DebugLoc &DL = From.getDebugLoc();
+  MachineInstr *Skip =
+    BuildMI(*From.getParent(), &From, DL, TII->get(AMDGPU::S_CBRANCH_EXECZ))
     .addOperand(To);
+  return Skip;
 }
 
 bool SILowerControlFlow::skipIfDead(MachineInstr &MI, MachineBasicBlock &NextBB) {
@@ -242,17 +243,20 @@ void SILowerControlFlow::If(MachineInstr &MI) {
           .addReg(AMDGPU::EXEC)
           .addReg(Reg);
 
-  Skip(MI, MI.getOperand(2));
+  MachineInstr *SkipInst = Skip(MI, MI.getOperand(2));
+
+  // Insert before the new branch instruction.
+  MachineInstr *InsPt = SkipInst ? SkipInst : &MI;
 
   // Insert a pseudo terminator to help keep the verifier happy.
-  BuildMI(MBB, &MI, DL, TII->get(AMDGPU::SI_MASK_BRANCH))
+  BuildMI(MBB, InsPt, DL, TII->get(AMDGPU::SI_MASK_BRANCH))
     .addOperand(MI.getOperand(2))
     .addReg(Reg);
 
   MI.eraseFromParent();
 }
 
-void SILowerControlFlow::Else(MachineInstr &MI, bool ExecModified) {
+void SILowerControlFlow::Else(MachineInstr &MI) {
   MachineBasicBlock &MBB = *MI.getParent();
   DebugLoc DL = MI.getDebugLoc();
   unsigned Dst = MI.getOperand(0).getReg();
@@ -262,7 +266,7 @@ void SILowerControlFlow::Else(MachineInstr &MI, bool ExecModified) {
           TII->get(AMDGPU::S_OR_SAVEEXEC_B64), Dst)
           .addReg(Src); // Saved EXEC
 
-  if (ExecModified) {
+  if (MI.getOperand(3).getImm() != 0) {
     // Adjust the saved exec to account for the modifications during the flow
     // block that contains the ELSE. This can happen when WQM mode is switched
     // off.
@@ -275,10 +279,13 @@ void SILowerControlFlow::Else(MachineInstr &MI, bool ExecModified) {
           .addReg(AMDGPU::EXEC)
           .addReg(Dst);
 
-  Skip(MI, MI.getOperand(2));
+  MachineInstr *SkipInst = Skip(MI, MI.getOperand(2));
+
+  // Insert before the new branch instruction.
+  MachineInstr *InsPt = SkipInst ? SkipInst : &MI;
 
   // Insert a pseudo terminator to help keep the verifier happy.
-  BuildMI(MBB, &MI, DL, TII->get(AMDGPU::SI_MASK_BRANCH))
+  BuildMI(MBB, InsPt, DL, TII->get(AMDGPU::SI_MASK_BRANCH))
     .addOperand(MI.getOperand(2))
     .addReg(Dst);
 
@@ -412,10 +419,7 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
   TRI = &TII->getRegisterInfo();
   SkipThreshold = SkipThresholdFlag;
 
-  SIMachineFunctionInfo *MFI = MF.getInfo<SIMachineFunctionInfo>();
-
   bool HaveKill = false;
-  bool NeedFlat = false;
   unsigned Depth = 0;
 
   MachineFunction::iterator NextBB;
@@ -427,19 +431,11 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
 
     MachineBasicBlock *EmptyMBBAtEnd = nullptr;
     MachineBasicBlock::iterator I, Next;
-    bool ExecModified = false;
 
     for (I = MBB.begin(); I != MBB.end(); I = Next) {
       Next = std::next(I);
 
       MachineInstr &MI = *I;
-
-      // Flat uses m0 in case it needs to access LDS.
-      if (TII->isFLAT(MI))
-        NeedFlat = true;
-
-      if (I->modifiesRegister(AMDGPU::EXEC, TRI))
-        ExecModified = true;
 
       switch (MI.getOpcode()) {
         default: break;
@@ -449,7 +445,7 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
           break;
 
         case AMDGPU::SI_ELSE:
-          Else(MI, ExecModified);
+          Else(MI);
           break;
 
         case AMDGPU::SI_BREAK:
@@ -516,13 +512,5 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
       }
     }
   }
-
-  if (NeedFlat && MFI->isKernel()) {
-    // TODO: What to use with function calls?
-    // We will need to Initialize the flat scratch register pair.
-    if (NeedFlat)
-      MFI->setHasFlatInstructions(true);
-  }
-
   return true;
 }

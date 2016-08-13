@@ -16,18 +16,6 @@
 using namespace llvm;
 
 namespace {
-static const unsigned kHWDivKinds[] = {
-#define ARM_HW_DIV_NAME(NAME, ID) ID,
-#include "llvm/Support/ARMTargetParser.def"
-#undef ARM_HW_DIV_NAME
-};
-
-static const unsigned kARMArchExtKinds[] = {
-#define ARM_ARCH_EXT_NAME(NAME, ID, FEATURE, NEGFEATURE) ID,
-#include "llvm/Support/ARMTargetParser.def"
-#undef ARM_ARCH_EXT_NAME
-};
-
 static const unsigned kAArch64ArchExtKinds[] = {
 #define AARCH64_ARCH_EXT_NAME(NAME, ID, FEATURE, NEGFEATURE) ID,
 #include "llvm/Support/AArch64TargetParser.def"
@@ -93,6 +81,13 @@ bool contains(const T (&array)[N], const T element) {
          std::end(array);
 }
 
+template <size_t N>
+bool contains(const char *(&array)[N], const char *element) {
+  return std::find_if(std::begin(array), std::end(array), [&](const char *S) {
+           return ::strcmp(S, element) == 0;
+         }) != std::end(array);
+}
+
 TEST(TargetParserTest, ARMArchName) {
   for (ARM::ArchKind AK = static_cast<ARM::ArchKind>(0);
        AK <= ARM::ArchKind::AK_LAST;
@@ -133,9 +128,9 @@ TEST(TargetParserTest, ARMFPUVersion) {
        FK <= ARM::FPUKind::FK_LAST;
        FK = static_cast<ARM::FPUKind>(static_cast<unsigned>(FK) + 1))
     if (FK == ARM::FK_LAST)
-      EXPECT_EQ(0, ARM::getFPUVersion(FK));
+      EXPECT_EQ(0U, ARM::getFPUVersion(FK));
     else
-      EXPECT_LE(0, ARM::getFPUVersion(FK));
+      EXPECT_LE(0U, ARM::getFPUVersion(FK));
 }
 
 TEST(TargetParserTest, ARMFPUNeonSupportLevel) {
@@ -143,9 +138,9 @@ TEST(TargetParserTest, ARMFPUNeonSupportLevel) {
        FK <= ARM::FPUKind::FK_LAST;
        FK = static_cast<ARM::FPUKind>(static_cast<unsigned>(FK) + 1))
     if (FK == ARM::FK_LAST)
-      EXPECT_EQ(0, ARM::getFPUNeonSupportLevel(FK));
+      EXPECT_EQ(0U, ARM::getFPUNeonSupportLevel(FK));
     else
-      EXPECT_LE(0, ARM::getFPUNeonSupportLevel(FK));
+      EXPECT_LE(0U, ARM::getFPUNeonSupportLevel(FK));
 }
 
 TEST(TargetParserTest, ARMFPURestriction) {
@@ -153,9 +148,9 @@ TEST(TargetParserTest, ARMFPURestriction) {
        FK <= ARM::FPUKind::FK_LAST;
        FK = static_cast<ARM::FPUKind>(static_cast<unsigned>(FK) + 1))
     if (FK == ARM::FK_LAST)
-      EXPECT_EQ(0, ARM::getFPURestriction(FK));
+      EXPECT_EQ(0U, ARM::getFPURestriction(FK));
     else
-      EXPECT_LE(0, ARM::getFPURestriction(FK));
+      EXPECT_LE(0U, ARM::getFPURestriction(FK));
 }
 
 TEST(TargetParserTest, ARMDefaultFPU) {
@@ -213,15 +208,6 @@ TEST(TargetParserTest, ARMArchAttr) {
                     : (kARMARCHNames[AK].ArchAttr == ARM::getArchAttr(AK)));
 }
 
-TEST(TargetParserTest, ARMArchExtName) {
-  for (ARM::ArchExtKind AEK = static_cast<ARM::ArchExtKind>(0);
-       AEK <= ARM::ArchExtKind::AEK_XSCALE;
-       AEK = static_cast<ARM::ArchExtKind>(static_cast<unsigned>(AEK) + 1))
-    EXPECT_TRUE(contains(kARMArchExtKinds, static_cast<unsigned>(AEK))
-                    ? !ARM::getArchExtName(AEK).empty()
-                    : ARM::getArchExtName(AEK).empty());
-}
-
 TEST(TargetParserTest, ARMArchExtFeature) {
   const char *ArchExt[][4] = {{"crc", "nocrc", "+crc", "-crc"},
                               {"crypto", "nocrypto", "+crypto", "-crypto"},
@@ -244,15 +230,6 @@ TEST(TargetParserTest, ARMArchExtFeature) {
     EXPECT_STREQ(ArchExt[i][2], ARM::getArchExtFeature(ArchExt[i][0]));
     EXPECT_STREQ(ArchExt[i][3], ARM::getArchExtFeature(ArchExt[i][1]));
   }
-}
-
-TEST(TargetParserTest, ARMHWDivName) {
-  for (ARM::ArchExtKind AEK = static_cast<ARM::ArchExtKind>(0);
-       AEK <= ARM::ArchExtKind::AEK_XSCALE;
-       AEK = static_cast<ARM::ArchExtKind>(static_cast<unsigned>(AEK) + 1))
-    EXPECT_TRUE(contains(kHWDivKinds, static_cast<unsigned>(AEK))
-                    ? !ARM::getHWDivName(AEK).empty()
-                    : ARM::getHWDivName(AEK).empty());
 }
 
 TEST(TargetParserTest, ARMDefaultCPU) {
@@ -340,13 +317,15 @@ TEST(TargetParserTest, ARMparseCPUArch) {
       "cortex-r5",     "cortex-r7",     "cortex-r8",   "sc300",
       "cortex-m3",     "cortex-m4",     "cortex-m7",   "cortex-a32",
       "cortex-a35",    "cortex-a53",    "cortex-a57",  "cortex-a72",
-      "cortex-a73",    "cyclone",       "exynos-m1",   "iwmmxt",
-      "xscale",        "swift"};
+      "cortex-a73",    "cyclone",       "exynos-m1",   "exynos-m2",   
+      "iwmmxt",        "xscale",        "swift"};
 
-  for (const auto &ARMCPUName : kARMCPUNames)
-    EXPECT_TRUE(contains(CPU, ARMCPUName.Name)
-                    ? (ARM::AK_INVALID != ARM::parseCPUArch(ARMCPUName.Name))
-                    : (ARM::AK_INVALID == ARM::parseCPUArch(ARMCPUName.Name)));
+  for (const auto &ARMCPUName : kARMCPUNames) {
+    if (contains(CPU, ARMCPUName.Name))
+      EXPECT_NE(ARM::AK_INVALID, ARM::parseCPUArch(ARMCPUName.Name));
+    else
+      EXPECT_EQ(ARM::AK_INVALID, ARM::parseCPUArch(ARMCPUName.Name));
+  }
 }
 
 TEST(TargetParserTest, ARMparseArchEndianAndISA) {
@@ -421,9 +400,9 @@ TEST(TargetParserTest, ARMparseArchProfile) {
 TEST(TargetParserTest, ARMparseArchVersion) {
   for (unsigned i = 0; i < array_lengthof(ARMArch); i++)
     if (((std::string)ARMArch[i]).substr(0, 4) == "armv")
-      EXPECT_EQ((ARMArch[i][4] - 48), ARM::parseArchVersion(ARMArch[i]));
+      EXPECT_EQ((ARMArch[i][4] - 48u), ARM::parseArchVersion(ARMArch[i]));
     else
-      EXPECT_EQ(5, ARM::parseArchVersion(ARMArch[i]));
+      EXPECT_EQ(5u, ARM::parseArchVersion(ARMArch[i]));
 }
 
 TEST(TargetParserTest, AArch64DefaultFPU) {
@@ -565,7 +544,8 @@ TEST(TargetParserTest, AArch64parseArchExt) {
 TEST(TargetParserTest, AArch64parseCPUArch) {
   const char *CPU[] = {"cortex-a35", "cortex-a53", "cortex-a57",
                        "cortex-a72", "cortex-a73", "cyclone",
-                       "exynos-m1",  "kryo",       "vulcan"};
+                       "exynos-m1",  "exynos-m2",  "kryo",
+                       "vulcan"};
 
   for (const auto &AArch64CPUName : kAArch64CPUNames)
     EXPECT_TRUE(contains(CPU, AArch64CPUName.Name)

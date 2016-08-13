@@ -237,7 +237,7 @@ define <2 x double> @test6(<2 x i64> %trigger, <2 x double>* %addr, <2 x double>
 ; SKX-NEXT:    vpxord %xmm2, %xmm2, %xmm2
 ; SKX-NEXT:    vpcmpeqq %xmm2, %xmm0, %k1
 ; SKX-NEXT:    vmovupd (%rdi), %xmm1 {%k1}
-; SKX-NEXT:    vmovaps %xmm1, %xmm0
+; SKX-NEXT:    vmovapd %xmm1, %xmm0
 ; SKX-NEXT:    retq
   %mask = icmp eq <2 x i64> %trigger, zeroinitializer
   %res = call <2 x double> @llvm.masked.load.v2f64.p0v2f64(<2 x double>* %addr, i32 4, <2 x i1>%mask, <2 x double>%dst)
@@ -303,7 +303,7 @@ define <4 x i32> @test8(<4 x i32> %trigger, <4 x i32>* %addr, <4 x i32> %dst) {
 ; SKX-NEXT:    vpxord %xmm2, %xmm2, %xmm2
 ; SKX-NEXT:    vpcmpeqd %xmm2, %xmm0, %k1
 ; SKX-NEXT:    vmovdqu32 (%rdi), %xmm1 {%k1}
-; SKX-NEXT:    vmovaps %xmm1, %xmm0
+; SKX-NEXT:    vmovdqa64 %xmm1, %xmm0
 ; SKX-NEXT:    retq
   %mask = icmp eq <4 x i32> %trigger, zeroinitializer
   %res = call <4 x i32> @llvm.masked.load.v4i32.p0v4i32(<4 x i32>* %addr, i32 4, <4 x i1>%mask, <4 x i32>%dst)
@@ -379,7 +379,7 @@ define <4 x double> @test10(<4 x i32> %trigger, <4 x double>* %addr, <4 x double
 ; SKX-NEXT:    vpxord %xmm2, %xmm2, %xmm2
 ; SKX-NEXT:    vpcmpeqd %xmm2, %xmm0, %k1
 ; SKX-NEXT:    vmovapd (%rdi), %ymm1 {%k1}
-; SKX-NEXT:    vmovaps %ymm1, %ymm0
+; SKX-NEXT:    vmovapd %ymm1, %ymm0
 ; SKX-NEXT:    retq
   %mask = icmp eq <4 x i32> %trigger, zeroinitializer
   %res = call <4 x double> @llvm.masked.load.v4f64.p0v4f64(<4 x double>* %addr, i32 32, <4 x i1>%mask, <4 x double>%dst)
@@ -509,7 +509,7 @@ define <8 x i32> @test11b(<8 x i1> %mask, <8 x i32>* %addr, <8 x i32> %dst) {
 ; SKX-NEXT:    vpsllw $15, %xmm0, %xmm0
 ; SKX-NEXT:    vpmovw2m %xmm0, %k1
 ; SKX-NEXT:    vmovdqu32 (%rdi), %ymm1 {%k1}
-; SKX-NEXT:    vmovaps %ymm1, %ymm0
+; SKX-NEXT:    vmovdqa64 %ymm1, %ymm0
 ; SKX-NEXT:    retq
   %res = call <8 x i32> @llvm.masked.load.v8i32.p0v8i32(<8 x i32>* %addr, i32 4, <8 x i1>%mask, <8 x i32>%dst)
   ret <8 x i32> %res
@@ -2465,8 +2465,7 @@ define <16 x i8> @test_mask_load_16xi8(<16 x i1> %mask, <16 x i8>* %addr, <16 x 
 ; AVX512F-NEXT:  ## BB#29: ## %cond.load40
 ; AVX512F-NEXT:    vpinsrb $14, 14(%rdi), %xmm0, %xmm0
 ; AVX512F-NEXT:  LBB50_30: ## %else41
-; AVX512F-NEXT:    kshiftlw $0, %k1, %k0
-; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
+; AVX512F-NEXT:    kshiftrw $15, %k1, %k0
 ; AVX512F-NEXT:    kmovw %k0, %eax
 ; AVX512F-NEXT:    testb %al, %al
 ; AVX512F-NEXT:    je LBB50_32
@@ -4763,7 +4762,6 @@ define <64 x i8> @test_mask_load_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x 
 ; AVX512F-NEXT:    vpblendd {{.*#+}} ymm0 = ymm6[0,1,2,3],ymm0[4,5,6,7]
 ; AVX512F-NEXT:  LBB52_30: ## %else41
 ; AVX512F-NEXT:    vptestmd %zmm1, %zmm1, %k1
-; AVX512F-NEXT:    kshiftlw $0, %k0, %k0
 ; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
 ; AVX512F-NEXT:    kmovw %k0, -{{[0-9]+}}(%rsp) ## 2-byte Spill
 ; AVX512F-NEXT:    kmovw %k0, %eax
@@ -4941,7 +4939,6 @@ define <64 x i8> @test_mask_load_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x 
 ; AVX512F-NEXT:    vinserti128 $1, %xmm2, %ymm0, %ymm0
 ; AVX512F-NEXT:  LBB52_62: ## %else89
 ; AVX512F-NEXT:    vptestmd %zmm1, %zmm1, %k0
-; AVX512F-NEXT:    kshiftlw $0, %k1, %k1
 ; AVX512F-NEXT:    kshiftrw $15, %k1, %k1
 ; AVX512F-NEXT:    kmovw %k1, -{{[0-9]+}}(%rsp) ## 2-byte Spill
 ; AVX512F-NEXT:    kmovw %k1, %eax
@@ -5105,7 +5102,6 @@ define <64 x i8> @test_mask_load_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x 
 ; AVX512F-NEXT:    vpblendd {{.*#+}} ymm1 = ymm3[0,1,2,3],ymm1[4,5,6,7]
 ; AVX512F-NEXT:  LBB52_94: ## %else137
 ; AVX512F-NEXT:    vptestmd %zmm2, %zmm2, %k1
-; AVX512F-NEXT:    kshiftlw $0, %k0, %k0
 ; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
 ; AVX512F-NEXT:    kmovw %k0, {{[0-9]+}}(%rsp) ## 2-byte Spill
 ; AVX512F-NEXT:    kmovw %k0, %eax
@@ -5274,7 +5270,6 @@ define <64 x i8> @test_mask_load_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x 
 ; AVX512F-NEXT:    vpinsrb $14, 62(%rdi), %xmm2, %xmm2
 ; AVX512F-NEXT:    vinserti128 $1, %xmm2, %ymm1, %ymm1
 ; AVX512F-NEXT:  LBB52_126: ## %else185
-; AVX512F-NEXT:    kshiftlw $0, %k1, %k1
 ; AVX512F-NEXT:    kshiftrw $15, %k1, %k1
 ; AVX512F-NEXT:    kmovw %k1, %eax
 ; AVX512F-NEXT:    testb %al, %al
@@ -6108,8 +6103,7 @@ define <16 x i16> @test_mask_load_16xi16(<16 x i1> %mask, <16 x i16>* %addr, <16
 ; AVX512F-NEXT:    vpinsrw $6, 28(%rdi), %xmm1, %xmm1
 ; AVX512F-NEXT:    vinserti128 $1, %xmm1, %ymm0, %ymm0
 ; AVX512F-NEXT:  LBB54_30: ## %else41
-; AVX512F-NEXT:    kshiftlw $0, %k1, %k0
-; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
+; AVX512F-NEXT:    kshiftrw $15, %k1, %k0
 ; AVX512F-NEXT:    kmovw %k0, %eax
 ; AVX512F-NEXT:    testb %al, %al
 ; AVX512F-NEXT:    je LBB54_32
@@ -7145,7 +7139,6 @@ define void @test_mask_store_16xi8(<16 x i1> %mask, <16 x i8>* %addr, <16 x i8> 
 ; AVX512F-NEXT:  ## BB#29: ## %cond.store27
 ; AVX512F-NEXT:    vpextrb $14, %xmm1, 14(%rdi)
 ; AVX512F-NEXT:  LBB56_30: ## %else28
-; AVX512F-NEXT:    kshiftlw $0, %k0, %k0
 ; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
 ; AVX512F-NEXT:    kmovw %k0, %eax
 ; AVX512F-NEXT:    testb %al, %al
@@ -8780,7 +8773,6 @@ define void @test_mask_store_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x i8> 
 ; AVX512F-NEXT:    vpextrb $14, %xmm4, 14(%rdi)
 ; AVX512F-NEXT:  LBB58_30: ## %else28
 ; AVX512F-NEXT:    vptestmd %zmm0, %zmm0, %k1
-; AVX512F-NEXT:    kshiftlw $0, %k0, %k0
 ; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
 ; AVX512F-NEXT:    kmovw %k0, %eax
 ; AVX512F-NEXT:    testb %al, %al
@@ -8926,7 +8918,6 @@ define void @test_mask_store_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x i8> 
 ; AVX512F-NEXT:    vpextrb $14, %xmm1, 30(%rdi)
 ; AVX512F-NEXT:  LBB58_62: ## %else60
 ; AVX512F-NEXT:    vptestmd %zmm0, %zmm0, %k0
-; AVX512F-NEXT:    kshiftlw $0, %k1, %k1
 ; AVX512F-NEXT:    kshiftrw $15, %k1, %k1
 ; AVX512F-NEXT:    kmovw %k1, %eax
 ; AVX512F-NEXT:    testb %al, %al
@@ -9058,7 +9049,6 @@ define void @test_mask_store_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x i8> 
 ; AVX512F-NEXT:    vpextrb $14, %xmm5, 46(%rdi)
 ; AVX512F-NEXT:  LBB58_94: ## %else92
 ; AVX512F-NEXT:    vptestmd %zmm0, %zmm0, %k1
-; AVX512F-NEXT:    kshiftlw $0, %k0, %k0
 ; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
 ; AVX512F-NEXT:    kmovw %k0, %eax
 ; AVX512F-NEXT:    testb %al, %al
@@ -9201,8 +9191,7 @@ define void @test_mask_store_64xi8(<64 x i1> %mask, <64 x i8>* %addr, <64 x i8> 
 ; AVX512F-NEXT:    vextracti128 $1, %ymm5, %xmm0
 ; AVX512F-NEXT:    vpextrb $14, %xmm0, 62(%rdi)
 ; AVX512F-NEXT:  LBB58_126: ## %else124
-; AVX512F-NEXT:    kshiftlw $0, %k1, %k0
-; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
+; AVX512F-NEXT:    kshiftrw $15, %k1, %k0
 ; AVX512F-NEXT:    kmovw %k0, %eax
 ; AVX512F-NEXT:    testb %al, %al
 ; AVX512F-NEXT:    je LBB58_128
@@ -9709,7 +9698,6 @@ define void @test_mask_store_16xi16(<16 x i1> %mask, <16 x i16>* %addr, <16 x i1
 ; AVX512F-NEXT:    vextracti128 $1, %ymm1, %xmm0
 ; AVX512F-NEXT:    vpextrw $6, %xmm0, 28(%rdi)
 ; AVX512F-NEXT:  LBB60_30: ## %else28
-; AVX512F-NEXT:    kshiftlw $0, %k0, %k0
 ; AVX512F-NEXT:    kshiftrw $15, %k0, %k0
 ; AVX512F-NEXT:    kmovw %k0, %eax
 ; AVX512F-NEXT:    testb %al, %al

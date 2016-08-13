@@ -675,8 +675,8 @@ void MDNode::handleChangedOperand(void *Ref, Metadata *New) {
   Metadata *Old = getOperand(Op);
   setOperand(Op, New);
 
-  // Drop uniquing for self-reference cycles.
-  if (New == this) {
+  // Drop uniquing for self-reference cycles and deleted constants.
+  if (New == this || (!New && Old && isa<ConstantAsMetadata>(Old))) {
     if (!isResolved())
       resolve();
     storeDistinctInContext();
@@ -878,7 +878,7 @@ MDNode *MDNode::intersect(MDNode *A, MDNode *B) {
 
   SmallVector<Metadata *, 4> MDs;
   for (Metadata *MD : A->operands())
-    if (std::find(B->op_begin(), B->op_end(), MD) != B->op_end())
+    if (is_contained(B->operands(), MD))
       MDs.push_back(MD);
 
   // FIXME: This preserves long-standing behaviour, but is it really the right
@@ -892,7 +892,7 @@ MDNode *MDNode::getMostGenericAliasScope(MDNode *A, MDNode *B) {
 
   SmallVector<Metadata *, 4> MDs(B->op_begin(), B->op_end());
   for (Metadata *MD : A->operands())
-    if (std::find(B->op_begin(), B->op_end(), MD) == B->op_end())
+    if (!is_contained(B->operands(), MD))
       MDs.push_back(MD);
 
   // FIXME: This preserves long-standing behaviour, but is it really the right

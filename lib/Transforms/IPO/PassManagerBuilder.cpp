@@ -19,6 +19,7 @@
 #include "llvm/Analysis/CFLAndersAliasAnalysis.h"
 #include "llvm/Analysis/CFLSteensAliasAnalysis.h"
 #include "llvm/Analysis/GlobalsModRef.h"
+#include "llvm/Analysis/InlineCost.h"
 #include "llvm/Analysis/Passes.h"
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -138,8 +139,8 @@ static cl::opt<int> PreInlineThreshold(
              "(default = 75)"));
 
 static cl::opt<bool> EnableGVNHoist(
-    "enable-gvn-hoist", cl::init(false), cl::Hidden,
-    cl::desc("Enable the experimental GVN Hoisting pass"));
+    "enable-gvn-hoist", cl::init(true), cl::Hidden,
+    cl::desc("Enable the GVN hoisting pass (default = on)"));
 
 PassManagerBuilder::PassManagerBuilder() {
     OptLevel = 2;
@@ -252,8 +253,17 @@ void PassManagerBuilder::addPGOInstrPasses(legacy::PassManagerBase &MPM) {
   // Perform the preinline and cleanup passes for O1 and above.
   // And avoid doing them if optimizing for size.
   if (OptLevel > 0 && SizeLevel == 0 && !DisablePreInliner) {
-    // Create preinline pass.
-    MPM.add(createFunctionInliningPass(PreInlineThreshold));
+    // Create preinline pass. We construct an InlineParams object and specify
+    // the threshold here to avoid the command line options of the regular
+    // inliner to influence pre-inlining. The only fields of InlineParams we
+    // care about are DefaultThreshold and HintThreshold.
+    InlineParams IP;
+    IP.DefaultThreshold = PreInlineThreshold;
+    // FIXME: The hint threshold has the same value used by the regular inliner.
+    // This should probably be lowered after performance testing.
+    IP.HintThreshold = 325;
+
+    MPM.add(createFunctionInliningPass(IP));
     MPM.add(createSROAPass());
     MPM.add(createEarlyCSEPass());             // Catch trivial redundancies
     MPM.add(createCFGSimplificationPass());    // Merge & remove BBs

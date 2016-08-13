@@ -16,6 +16,39 @@
 // Unary ops.
 //------------------------------------------------------------------------------
 
+// Extend the underlying scalar type of an operation, leaving the high bits
+// unspecified.
+def G_ANYEXTEND : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let hasSideEffects = 0;
+}
+
+// Sign extend the underlying scalar type of an operation, copying the sign bit
+// into the newly-created space.
+def G_SEXT : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let hasSideEffects = 0;
+}
+
+// Zero extend the underlying scalar type of an operation, putting zero bits
+// into the newly-created space.
+def G_ZEXT : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let hasSideEffects = 0;
+}
+
+
+// Truncate the underlying scalar type of an operation. This is equivalent to
+// G_EXTRACT for scalar types, but acts elementwise on vectors.
+def G_TRUNC : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src);
+  let hasSideEffects = 0;
+}
+
 def G_FRAME_INDEX : Instruction {
   let OutOperandList = (outs unknown:$dst);
   let InOperandList = (ins unknown:$src2);
@@ -40,6 +73,12 @@ def G_BITCAST : Instruction {
   let hasSideEffects = 0;
 }
 
+def G_CONSTANT : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$imm);
+  let hasSideEffects = 0;
+}
+
 //------------------------------------------------------------------------------
 // Binary ops.
 //------------------------------------------------------------------------------
@@ -60,6 +99,22 @@ def G_SUB : Instruction {
   let isCommutable = 0;
 }
 
+// Generic subtraction.
+def G_MUL : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src1, unknown:$src2);
+  let hasSideEffects = 0;
+  let isCommutable = 1;
+}
+
+// Generic addition consuming and producing a carry flag.
+def G_ADDE : Instruction {
+  let OutOperandList = (outs unknown:$dst, unknown:$carry_out);
+  let InOperandList = (ins unknown:$src1, unknown:$src2, unknown:$carry_in);
+  let hasSideEffects = 0;
+  let isCommutable = 1;
+}
+
 // Generic bitwise and.
 def G_AND : Instruction {
   let OutOperandList = (outs unknown:$dst);
@@ -74,6 +129,35 @@ def G_OR : Instruction {
   let InOperandList = (ins unknown:$src1, unknown:$src2);
   let hasSideEffects = 0;
   let isCommutable = 1;
+}
+
+// Generic bitwise xor.
+def G_XOR : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src1, unknown:$src2);
+  let hasSideEffects = 0;
+  let isCommutable = 1;
+}
+
+// Generic left-shift.
+def G_SHL : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src1, unknown:$src2);
+  let hasSideEffects = 0;
+}
+
+// Generic logical right-shift.
+def G_LSHR : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src1, unknown:$src2);
+  let hasSideEffects = 0;
+}
+
+// Generic arithmetic right-shift.
+def G_ASHR : Instruction {
+  let OutOperandList = (outs unknown:$dst);
+  let InOperandList = (ins unknown:$src1, unknown:$src2);
+  let hasSideEffects = 0;
 }
 
 //------------------------------------------------------------------------------
@@ -117,13 +201,40 @@ def G_SEQUENCE : Instruction {
   let hasSideEffects = 0;
 }
 
+// Intrinsic without side effects.
+def G_INTRINSIC : Instruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$intrin, variable_ops);
+  let hasSideEffects = 0;
+}
+
+// Intrinsic with side effects.
+def G_INTRINSIC_W_SIDE_EFFECTS : Instruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$intrin, variable_ops);
+  let hasSideEffects = 1;
+  let mayLoad = 1;
+  let mayStore = 1;
+}
+
 //------------------------------------------------------------------------------
 // Branches.
 //------------------------------------------------------------------------------
+
 // Generic unconditional branch.
 def G_BR : Instruction {
   let OutOperandList = (outs);
   let InOperandList = (ins unknown:$src1);
+  let hasSideEffects = 0;
+  let isBranch = 1;
+  let isTerminator = 1;
+  let isBarrier = 1;
+}
+
+// Generic conditional branch.
+def G_BRCOND : Instruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins unknown:$tst, unknown:$truebb);
   let hasSideEffects = 0;
   let isBranch = 1;
   let isTerminator = 1;

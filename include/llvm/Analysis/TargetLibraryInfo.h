@@ -87,7 +87,8 @@ public:
   enum VectorLibrary {
     NoLibrary, // Don't use any vector library.
     Accelerate, // Use Accelerate framework.
-    SLEEF // SLEEF (BG/Q port)
+    SLEEF, // SLEEF (BG/Q port)
+    SVML        // Intel short vector math library.
   };
 
   TargetLibraryInfoImpl();
@@ -253,7 +254,7 @@ public:
     case LibFunc::exp2:      case LibFunc::exp2f:      case LibFunc::exp2l:
     case LibFunc::memcmp:    case LibFunc::strcmp:     case LibFunc::strcpy:
     case LibFunc::stpcpy:    case LibFunc::strlen:     case LibFunc::strnlen:
-    case LibFunc::memchr:
+    case LibFunc::memchr:    case LibFunc::mempcpy:
       return true;
     }
     return false;
