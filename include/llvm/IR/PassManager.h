@@ -211,6 +211,31 @@ struct AnalysisInfoMixin : PassInfoMixin<DerivedT> {
   static void *ID() { return (void *)&DerivedT::PassID; }
 };
 
+/// A class template to provide analysis sets for IR units.
+///
+/// Analyses operate on units of IR. It is useful to be able to talk about
+/// preservation of all analyses for a given unit of IR as a set. This class
+/// template can be used with the \c PreservedAnalyses API for that purpose and
+/// the \c AnalysisManager will automatically check and use this set to skip
+/// invalidation events.
+///
+/// Note that you must provide an explicit instantiation declaration and
+/// definition for this template in order to get the correct behavior on
+/// Windows. Otherwise, the address of SetID will not be stable.
+template <typename IRUnitT>
+class AllAnalysesOn {
+public:
+  static void *ID() { return (void *)&SetID; }
+
+private:
+  static char SetID;
+};
+
+template <typename IRUnitT> char AllAnalysesOn<IRUnitT>::SetID;
+
+extern template class AllAnalysesOn<Module>;
+extern template class AllAnalysesOn<Function>;
+
 /// \brief Manages a sequence of passes over units of IR.
 ///
 /// A pass manager contains a sequence of passes to run over units of IR. It is
@@ -275,6 +300,12 @@ public:
       //IR.getContext().yield();
     }
 
+    // Invaliadtion was handled after each pass in the above loop for the
+    // current unit of IR. Therefore, the remaining analysis results in the
+    // AnalysisManager are preserved. We mark this with a set so that we don't
+    // need to inspect each one individually.
+    PA.preserve<AllAnalysesOn<IRUnitT>>();
+
     if (DebugLogging)
       dbgs() << "Finished " << getTypeName<IRUnitT>() << " pass manager run.\n";
 
@@ -315,8 +346,7 @@ typedef PassManager<Function> FunctionPassManager;
 /// This analysis manager can be used for any IR unit where the address of the
 /// IR unit sufficies as its identity. It manages the cache for a unit of IR via
 /// the address of each unit of IR cached.
-template <typename IRUnitT, typename... ExtraArgTs>
-class AnalysisManager {
+template <typename IRUnitT, typename... ExtraArgTs> class AnalysisManager {
   typedef detail::AnalysisResultConcept<IRUnitT> ResultConceptT;
   typedef detail::AnalysisPassConcept<IRUnitT, ExtraArgTs...> PassConceptT;
 
@@ -369,7 +399,8 @@ public:
   typename PassT::Result &getResult(IRUnitT &IR, ExtraArgTs... ExtraArgs) {
     assert(AnalysisPasses.count(PassT::ID()) &&
            "This analysis pass was not registered prior to being queried");
-    ResultConceptT &ResultConcept = getResultImpl(PassT::ID(), IR, ExtraArgs...);
+    ResultConceptT &ResultConcept =
+        getResultImpl(PassT::ID(), IR, ExtraArgs...);
     typedef detail::AnalysisResultModel<IRUnitT, PassT, typename PassT::Result>
         ResultModelT;
     return static_cast<ResultModelT &>(ResultConcept).Result;
@@ -443,8 +474,8 @@ public:
   /// analyis pass which has been successfully invalidated and thus can be
   /// preserved going forward. The updated set is returned.
   PreservedAnalyses invalidate(IRUnitT &IR, PreservedAnalyses PA) {
-    // Short circuit for a common case of all analyses being preserved.
-    if (PA.areAllPreserved())
+    // Short circuit for common cases of all analyses being preserved.
+    if (PA.areAllPreserved() || PA.preserved<AllAnalysesOn<IRUnitT>>())
       return PA;
 
     if (DebugLogging)
@@ -888,34 +919,29 @@ createModuleToFunctionPassAdaptor(FunctionPassT Pass) {
 
 /// \brief A template utility pass to force an analysis result to be available.
 ///
-/// This is a no-op pass which simply forces a specific analysis pass's result
-/// to be available when it is run.
-template <typename AnalysisT, typename IRUnitT,
-          typename AnalysisManagerT = AnalysisManager<IRUnitT>,
-          typename... ExtraArgTs>
-struct RequireAnalysisPass;
-
-/// A specialization of the RequireAnalysisPass for generic IR unit analysis
-/// managers and pass managers that have no extra arguments.
-///
 /// If there are extra arguments at the pass's run level there may also be
 /// extra arguments to the analysis manager's \c getResult routine. We can't
 /// guess how to effectively map the arguments from one to the other, and so
-/// only the specialization with no extra arguments is provided generically.
+/// this specialization just ignores them.
+///
 /// Specific patterns of run-method extra arguments and analysis manager extra
-/// arguments will have to be defined as appropriate for those patterns.
-template <typename AnalysisT, typename IRUnitT>
-struct RequireAnalysisPass<AnalysisT, IRUnitT, AnalysisManager<IRUnitT>>
-    : PassInfoMixin<
-          RequireAnalysisPass<AnalysisT, IRUnitT, AnalysisManager<IRUnitT>>> {
+/// arguments will have to be defined as appropriate specializations.
+template <typename AnalysisT, typename IRUnitT,
+          typename AnalysisManagerT = AnalysisManager<IRUnitT>,
+          typename... ExtraArgTs>
+struct RequireAnalysisPass
+    : PassInfoMixin<RequireAnalysisPass<AnalysisT, IRUnitT, AnalysisManagerT,
+                                        ExtraArgTs...>> {
   /// \brief Run this pass over some unit of IR.
   ///
   /// This pass can be run over any unit of IR and use any analysis manager
   /// provided they satisfy the basic API requirements. When this pass is
   /// created, these methods can be instantiated to satisfy whatever the
   /// context requires.
-  PreservedAnalyses run(IRUnitT &Arg, AnalysisManager<IRUnitT> &AM) {
-    (void)AM.template getResult<AnalysisT>(Arg);
+  PreservedAnalyses run(IRUnitT &Arg, AnalysisManagerT &AM,
+                        ExtraArgTs &&... Args) {
+    (void)AM.template getResult<AnalysisT>(Arg,
+                                           std::forward<ExtraArgTs>(Args)...);
 
     return PreservedAnalyses::all();
   }
@@ -979,12 +1005,11 @@ public:
     return *this;
   }
 
-  template <typename IRUnitT, typename... Ts>
-  PreservedAnalyses run(IRUnitT &Arg, AnalysisManager<IRUnitT> &AM,
-                        Ts... Args) {
+  template <typename IRUnitT, typename AnalysisManagerT, typename... Ts>
+  PreservedAnalyses run(IRUnitT &Arg, AnalysisManagerT &AM, Ts &&... Args) {
     auto PA = PreservedAnalyses::all();
     for (int i = 0; i < Count; ++i)
-      PA.intersect(P.run(Arg, AM, Args...));
+      PA.intersect(P.run(Arg, AM, std::forward<Ts>(Args)...));
     return PA;
   }
 
