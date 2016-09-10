@@ -848,7 +848,7 @@ defm V_READLANE_B32 : VOP2SI_3VI_m <
   vop3 <0x001, 0x289>,
   "v_readlane_b32",
   (outs SReg_32:$vdst),
-  (ins VGPR_32:$src0, SCSrc_32:$src1),
+  (ins VGPR_32:$src0, SCSrc_b32:$src1),
   "v_readlane_b32 $vdst, $src0, $src1",
   [(set i32:$vdst, (int_amdgcn_readlane i32:$src0, i32:$src1))]
 >;
@@ -857,7 +857,7 @@ defm V_WRITELANE_B32 : VOP2SI_3VI_m <
   vop3 <0x002, 0x28a>,
   "v_writelane_b32",
   (outs VGPR_32:$vdst),
-  (ins SReg_32:$src0, SCSrc_32:$src1),
+  (ins SReg_32:$src0, SCSrc_b32:$src1),
   "v_writelane_b32 $vdst, $src0, $src1"
 >;
 
@@ -1179,7 +1179,7 @@ let hasSideEffects = 0, mayLoad = 0, mayStore = 0, Uses = [EXEC] in {
 
 // For use in patterns
 def V_CNDMASK_B64_PSEUDO : VOP3Common <(outs VReg_64:$vdst),
-  (ins VSrc_64:$src0, VSrc_64:$src1, SSrc_64:$src2), "", []> {
+  (ins VSrc_b64:$src0, VSrc_b64:$src1, SSrc_b64:$src2), "", []> {
   let isPseudo = 1;
   let isCodeGenOnly = 1;
   let usesCustomInserter = 1;
@@ -1187,7 +1187,7 @@ def V_CNDMASK_B64_PSEUDO : VOP3Common <(outs VReg_64:$vdst),
 
 // 64-bit vector move instruction.  This is mainly used by the SIFoldOperands
 // pass to enable folding of inline immediates.
-def V_MOV_B64_PSEUDO : PseudoInstSI <(outs VReg_64:$vdst), (ins VSrc_64:$src0)> {
+def V_MOV_B64_PSEUDO : PseudoInstSI <(outs VReg_64:$vdst), (ins VSrc_b64:$src0)> {
   let VALU = 1;
 }
 } // End let hasSideEffects = 0, mayLoad = 0, mayStore = 0, Uses = [EXEC]
@@ -1263,14 +1263,14 @@ def SI_ELSE_BREAK : CFPseudoInstSI <
 
 let Uses = [EXEC], Defs = [EXEC,VCC] in {
 def SI_KILL : PseudoInstSI <
-  (outs), (ins VSrc_32:$src),
+  (outs), (ins VSrc_b32:$src),
   [(AMDGPUkill i32:$src)]> {
   let isConvergent = 1;
   let usesCustomInserter = 1;
 }
 
 def SI_KILL_TERMINATOR : SPseudoInstSI <
-  (outs), (ins VSrc_32:$src)> {
+  (outs), (ins VSrc_b32:$src)> {
   let isTerminator = 1;
 }
 
@@ -1288,7 +1288,7 @@ def SI_PS_LIVE : PseudoInstSI <
 // s_mov_b32 rather than a copy of another initialized
 // register. MachineCSE skips copies, and we don't want to have to
 // fold operands before it runs.
-def SI_INIT_M0 : SPseudoInstSI <(outs), (ins SSrc_32:$src)> {
+def SI_INIT_M0 : SPseudoInstSI <(outs), (ins SSrc_b32:$src)> {
   let Defs = [M0];
   let usesCustomInserter = 1;
   let isAsCheapAsAMove = 1;
@@ -1337,17 +1337,17 @@ def SI_INDIRECT_DST_V16 : SI_INDIRECT_DST<VReg_512>;
 } // End Uses = [EXEC], Defs = [M0, EXEC]
 
 multiclass SI_SPILL_SGPR <RegisterClass sgpr_class> {
-  let UseNamedOperandTable = 1, Uses = [EXEC] in {
+  let UseNamedOperandTable = 1, SGPRSpill = 1, Uses = [EXEC] in {
     def _SAVE : PseudoInstSI <
       (outs),
-      (ins sgpr_class:$src, i32imm:$frame_idx)> {
+      (ins sgpr_class:$data, i32imm:$addr)> {
       let mayStore = 1;
       let mayLoad = 0;
     }
 
     def _RESTORE : PseudoInstSI <
-      (outs sgpr_class:$dst),
-      (ins i32imm:$frame_idx)> {
+      (outs sgpr_class:$data),
+      (ins i32imm:$addr)> {
       let mayStore = 0;
       let mayLoad = 1;
     }
@@ -1365,10 +1365,11 @@ defm SI_SPILL_S256 : SI_SPILL_SGPR <SReg_256>;
 defm SI_SPILL_S512 : SI_SPILL_SGPR <SReg_512>;
 
 multiclass SI_SPILL_VGPR <RegisterClass vgpr_class> {
-  let UseNamedOperandTable = 1, VGPRSpill = 1 in {
+  let UseNamedOperandTable = 1, VGPRSpill = 1,
+       SchedRW = [WriteVMEM] in {
     def _SAVE : VPseudoInstSI <
       (outs),
-      (ins vgpr_class:$src, i32imm:$frame_idx, SReg_128:$scratch_rsrc,
+      (ins vgpr_class:$vdata, i32imm:$vaddr, SReg_128:$scratch_rsrc,
            SReg_32:$scratch_offset, i32imm:$offset)> {
       let mayStore = 1;
       let mayLoad = 0;
@@ -1377,8 +1378,8 @@ multiclass SI_SPILL_VGPR <RegisterClass vgpr_class> {
     }
 
     def _RESTORE : VPseudoInstSI <
-      (outs vgpr_class:$dst),
-      (ins i32imm:$frame_idx, SReg_128:$scratch_rsrc, SReg_32:$scratch_offset,
+      (outs vgpr_class:$vdata),
+      (ins i32imm:$vaddr, SReg_128:$scratch_rsrc, SReg_32:$scratch_offset,
            i32imm:$offset)> {
       let mayStore = 0;
       let mayLoad = 1;
@@ -1386,7 +1387,7 @@ multiclass SI_SPILL_VGPR <RegisterClass vgpr_class> {
       // (2 * 4) + (8 * num_subregs) bytes maximum
       let Size = !add(!shl(!srl(vgpr_class.Size, 5), 3), 8);
     }
-  } // End UseNamedOperandTable = 1, VGPRSpill = 1
+  } // End UseNamedOperandTable = 1, VGPRSpill = 1, SchedRW = [WriteVMEM]
 }
 
 defm SI_SPILL_V32  : SI_SPILL_VGPR <VGPR_32>;
@@ -1871,7 +1872,7 @@ def : Pat <
 
 def : Pat <
   (fneg (fabs f32:$src)),
-  (S_OR_B32 $src, 0x80000000) // Set sign bit
+  (S_OR_B32 $src, (S_MOV_B32 0x80000000)) // Set sign bit
 >;
 
 // FIXME: Should use S_OR_B32

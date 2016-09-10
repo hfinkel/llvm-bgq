@@ -599,7 +599,7 @@ void SIRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator MI,
     case AMDGPU::SI_SPILL_V64_SAVE:
     case AMDGPU::SI_SPILL_V32_SAVE:
       buildScratchLoadStore(MI, AMDGPU::BUFFER_STORE_DWORD_OFFSET,
-            TII->getNamedOperand(*MI, AMDGPU::OpName::src),
+            TII->getNamedOperand(*MI, AMDGPU::OpName::vdata),
             TII->getNamedOperand(*MI, AMDGPU::OpName::scratch_rsrc)->getReg(),
             TII->getNamedOperand(*MI, AMDGPU::OpName::scratch_offset)->getReg(),
             FrameInfo.getObjectOffset(Index) +
@@ -614,7 +614,7 @@ void SIRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator MI,
     case AMDGPU::SI_SPILL_V256_RESTORE:
     case AMDGPU::SI_SPILL_V512_RESTORE: {
       buildScratchLoadStore(MI, AMDGPU::BUFFER_LOAD_DWORD_OFFSET,
-            TII->getNamedOperand(*MI, AMDGPU::OpName::dst),
+            TII->getNamedOperand(*MI, AMDGPU::OpName::vdata),
             TII->getNamedOperand(*MI, AMDGPU::OpName::scratch_rsrc)->getReg(),
             TII->getNamedOperand(*MI, AMDGPU::OpName::scratch_offset)->getReg(),
             FrameInfo.getObjectOffset(Index) +
@@ -791,14 +791,16 @@ bool SIRegisterInfo::shouldRewriteCopySrc(
 }
 
 bool SIRegisterInfo::opCanUseLiteralConstant(unsigned OpType) const {
-  return OpType == AMDGPU::OPERAND_REG_IMM32;
+  return OpType == AMDGPU::OPERAND_REG_IMM32_INT ||
+         OpType == AMDGPU::OPERAND_REG_IMM32_FP;
 }
 
 bool SIRegisterInfo::opCanUseInlineConstant(unsigned OpType) const {
   if (opCanUseLiteralConstant(OpType))
     return true;
 
-  return OpType == AMDGPU::OPERAND_REG_INLINE_C;
+  return OpType == AMDGPU::OPERAND_REG_INLINE_C_INT ||
+         OpType == AMDGPU::OPERAND_REG_INLINE_C_FP;
 }
 
 // FIXME: Most of these are flexible with HSA and we don't need to reserve them
