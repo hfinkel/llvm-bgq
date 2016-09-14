@@ -40,6 +40,9 @@ Error CoveragePrinterText::createIndexFile(
   CoverageReport Report(Opts, Coverage);
   Report.renderFileReports(OSRef);
 
+  Opts.colored_ostream(OSRef, raw_ostream::CYAN) << "\n"
+                                                 << Opts.getLLVMVersionString();
+
   return Error::success();
 }
 

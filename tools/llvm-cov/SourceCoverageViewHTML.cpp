@@ -381,7 +381,8 @@ Error CoveragePrinterHTML::createIndexFile(
   for (unsigned I = 0, E = FileReports.size(); I < E; ++I)
     emitFileSummary(OSRef, SourceFiles[I], FileReports[I]);
   emitFileSummary(OSRef, "Totals", Totals, /*IsTotals=*/true);
-  OSRef << EndTable << EndCenteredDiv;
+  OSRef << EndTable << EndCenteredDiv
+        << tag("h5", escape(Opts.getLLVMVersionString(), Opts));
   emitEpilog(OSRef);
 
   return Error::success();
