@@ -26,8 +26,7 @@ static cl::opt<TargetLibraryInfoImpl::VectorLibrary> ClVectorLibrary(
                clEnumValN(TargetLibraryInfoImpl::SLEEF, "SLEEF",
                           "SLEEF (for the BG/Q)"),
                clEnumValN(TargetLibraryInfoImpl::SVML, "SVML",
-                          "Intel SVML library"),
-               clEnumValEnd));
+                          "Intel SVML library")));
 
 static cl::opt<bool> ClVectorLibraryFM("vector-library-fast-math", cl::Hidden,
     cl::desc("Use fast-math vector functions library"), cl::init(false));
