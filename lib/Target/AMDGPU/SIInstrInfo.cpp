@@ -925,10 +925,15 @@ bool SIInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
     Bundler.append(BuildMI(MF, DL, get(AMDGPU::S_ADD_U32), RegLo)
                        .addReg(RegLo)
                        .addOperand(MI.getOperand(1)));
-    Bundler.append(BuildMI(MF, DL, get(AMDGPU::S_ADDC_U32), RegHi)
-                           .addReg(RegHi)
-                           .addImm(0));
 
+    MachineInstrBuilder MIB = BuildMI(MF, DL, get(AMDGPU::S_ADDC_U32), RegHi)
+                                  .addReg(RegHi);
+    if (MI.getOperand(2).getTargetFlags() == SIInstrInfo::MO_NONE)
+      MIB.addImm(0);
+    else
+      MIB.addOperand(MI.getOperand(2));
+
+    Bundler.append(MIB);
     llvm::finalizeBundle(MBB, Bundler.begin());
 
     MI.eraseFromParent();
@@ -1645,6 +1650,20 @@ MachineInstr *SIInstrInfo::convertToThreeAddress(MachineFunction::iterator &MBB,
       .addImm(0); // omod
 }
 
+// It's not generally safe to move VALU instructions across these since it will
+// start using the register as a base index rather than directly.
+// XXX - Why isn't hasSideEffects sufficient for these?
+static bool changesVGPRIndexingMode(const MachineInstr &MI) {
+  switch (MI.getOpcode()) {
+  case AMDGPU::S_SET_GPR_IDX_ON:
+  case AMDGPU::S_SET_GPR_IDX_MODE:
+  case AMDGPU::S_SET_GPR_IDX_OFF:
+    return true;
+  default:
+    return false;
+  }
+}
+
 bool SIInstrInfo::isSchedulingBoundary(const MachineInstr &MI,
                                        const MachineBasicBlock *MBB,
                                        const MachineFunction &MF) const {
@@ -1654,7 +1673,8 @@ bool SIInstrInfo::isSchedulingBoundary(const MachineInstr &MI,
   // when they operate on VGPRs. Treating EXEC modifications as scheduling
   // boundaries prevents incorrect movements of such instructions.
   return TargetInstrInfo::isSchedulingBoundary(MI, MBB, MF) ||
-         MI.modifiesRegister(AMDGPU::EXEC, &RI);
+         MI.modifiesRegister(AMDGPU::EXEC, &RI) ||
+         changesVGPRIndexingMode(MI);
 }
 
 bool SIInstrInfo::isInlineConstant(const APInt &Imm) const {
