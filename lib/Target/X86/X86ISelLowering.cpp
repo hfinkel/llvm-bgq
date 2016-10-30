@@ -1404,12 +1404,12 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
     } // Subtarget.hasCDI()
 
     if (Subtarget.hasDQI()) {
-      if (Subtarget.hasVLX()) {
-        setOperationAction(ISD::MUL,             MVT::v2i64, Legal);
-        setOperationAction(ISD::MUL,             MVT::v4i64, Legal);
-      }
+      // NonVLX sub-targets extend 128/256 vectors to use the 512 version.
+      setOperationAction(ISD::MUL,             MVT::v2i64, Legal);
+      setOperationAction(ISD::MUL,             MVT::v4i64, Legal);
       setOperationAction(ISD::MUL,             MVT::v8i64, Legal);
     }
+
     // Custom lower several nodes.
     for (auto VT : { MVT::v4i32, MVT::v8i32, MVT::v2i64, MVT::v4i64,
                      MVT::v4f32, MVT::v8f32, MVT::v2f64, MVT::v4f64 }) {
@@ -16148,6 +16148,11 @@ SDValue X86TargetLowering::LowerSELECT(SDValue Op, SelectionDAG &DAG) const {
       return DAG.getNode(X86ISD::FOR, DL, VT, AndN, And);
     }
   }
+
+  // AVX512 fallback is to lower selects of scalar floats to masked moves.
+  if (Cond.getValueType() == MVT::i1 && (VT == MVT::f64 || VT == MVT::f32) &&
+      Subtarget.hasAVX512())
+    return DAG.getNode(X86ISD::SELECTS, DL, VT, Cond, Op1, Op2);
 
   if (VT.isVector() && VT.getVectorElementType() == MVT::i1) {
     SDValue Op1Scalar;
@@ -31272,6 +31277,15 @@ static SDValue combineFMA(SDNode *N, SelectionDAG &DAG,
   SDValue B = N->getOperand(1);
   SDValue C = N->getOperand(2);
 
+  auto isScalarMaskedNode = [&](SDValue &V) {
+    if (V.hasOneUse())
+      return false;
+    for (auto User : V.getNode()->uses())
+      if (User->getOpcode() == X86ISD::SELECTS && N->isOperandOf(User))
+        return true;
+    return false;
+  };
+
   auto invertIfNegative = [](SDValue &V) {
     if (SDValue NegVal = isFNEG(V.getNode())) {
       V = NegVal;
@@ -31280,9 +31294,10 @@ static SDValue combineFMA(SDNode *N, SelectionDAG &DAG,
     return false;
   };
 
-  bool NegA = invertIfNegative(A);
-  bool NegB = invertIfNegative(B);
-  bool NegC = invertIfNegative(C);
+  // Do not convert scalar masked operations.
+  bool NegA = !isScalarMaskedNode(A) && invertIfNegative(A);
+  bool NegB = !isScalarMaskedNode(B) && invertIfNegative(B);
+  bool NegC = !isScalarMaskedNode(C) && invertIfNegative(C);
 
   // Negative multiplication when NegA xor NegB
   bool NegMul = (NegA != NegB);

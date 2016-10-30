@@ -118,7 +118,7 @@ DIE *DwarfCompileUnit::getOrCreateGlobalVariableDIE(
   else
     addGlobalName(GV->getName(), *VariableDIE, DeclContext);
 
-  if (DIAlignment AlignInBytes = GV->getAlignInBytes())
+  if (uint32_t AlignInBytes = GV->getAlignInBytes())
     addUInt(*VariableDIE, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
             AlignInBytes);
 
@@ -777,7 +777,7 @@ void DwarfCompileUnit::applyVariableAttributes(const DbgVariable &Var,
     addString(VariableDie, dwarf::DW_AT_name, Name);
   const auto *DIVar = Var.getVariable();
   if (DIVar)
-    if (DIAlignment AlignInBytes = DIVar->getAlignInBytes())
+    if (uint32_t AlignInBytes = DIVar->getAlignInBytes())
       addUInt(VariableDie, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
               AlignInBytes);
 

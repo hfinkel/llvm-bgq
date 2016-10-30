@@ -395,7 +395,7 @@ break:
 ; CHECK: s_and_b64 exec, exec, [[LIVE]]
 ; CHECK: buffer_store_dword {{v[0-9]+}}, off, {{s\[[0-9]+:[0-9]+\]}}, 0
 ; CHECK: s_wqm_b64 exec, exec
-; CHECK: buffer_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, {{s[0-9]+}} offen
+; CHECK: buffer_store_dword {{v[0-9]+}}, off, {{s\[[0-9]+:[0-9]+\]}}, {{s[0-9]+$}}
 ; CHECK: s_and_b64 exec, exec, [[LIVE]]
 ; CHECK: buffer_store_dword {{v[0-9]+}}, {{v[0-9]+}}, {{s\[[0-9]+:[0-9]+\]}}, 0 idxen
 ; CHECK: s_wqm_b64 exec, exec
@@ -459,7 +459,7 @@ entry:
   br i1 %cc, label %if, label %else
 
 if:
-  store volatile <4 x float> %dtex, <4 x float>* undef
+  store volatile <4 x float> %dtex, <4 x float> addrspace(1)* undef
   unreachable
 
 else:

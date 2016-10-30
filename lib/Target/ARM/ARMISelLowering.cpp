@@ -8594,16 +8594,11 @@ ARMTargetLowering::EmitLowered__dbzchk(MachineInstr &MI,
                  std::next(MachineBasicBlock::iterator(MI)), MBB->end());
   ContBB->transferSuccessorsAndUpdatePHIs(MBB);
 
-  MachineBasicBlock *TrapBB = MF->CreateMachineBasicBlock();
-  MF->push_back(TrapBB);
-  BuildMI(TrapBB, DL, TII->get(ARM::t2UDF)).addImm(249);
-  MBB->addSuccessor(TrapBB);
-
-  BuildMI(*MBB, MI, DL, TII->get(ARM::tCBZ))
+  BuildMI(*MBB, MI, DL, TII->get(ARM::tCBNZ))
       .addReg(MI.getOperand(0).getReg())
-      .addMBB(TrapBB);
-  AddDefaultPred(BuildMI(*MBB, MI, DL, TII->get(ARM::t2B)).addMBB(ContBB));
+      .addMBB(ContBB);
   MBB->addSuccessor(ContBB);
+  BuildMI(*MBB, MI, DL, TII->get(ARM::t__brkdiv0));
 
   MI.eraseFromParent();
   return ContBB;
@@ -9354,7 +9349,7 @@ static SDValue AddCombineTo64bitUMAAL(SDNode *AddcNode,
   // be combined into a UMLAL. The other pattern is AddcNode being combined
   // into an UMLAL and then using another addc is handled in ISelDAGToDAG.
 
-  if (!Subtarget->hasV6Ops() ||
+  if (!Subtarget->hasV6Ops() || !Subtarget->hasDSP() ||
       (Subtarget->isThumb() && !Subtarget->hasThumb2()))
     return AddCombineTo64bitMLAL(AddcNode, DCI, Subtarget);
 

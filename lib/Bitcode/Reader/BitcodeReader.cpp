@@ -838,9 +838,9 @@ static GlobalValueSummary::GVFlags getDecodedGVSummaryFlags(uint64_t RawFlags,
   // to getDecodedLinkage() will need to be taken into account here as above.
   auto Linkage = GlobalValue::LinkageTypes(RawFlags & 0xF); // 4 bits
   RawFlags = RawFlags >> 4;
-  bool HasSection = RawFlags & 0x1;
+  bool NoRename = RawFlags & 0x1;
   bool IsNotViableToInline = RawFlags & 0x2;
-  return GlobalValueSummary::GVFlags(Linkage, HasSection, IsNotViableToInline);
+  return GlobalValueSummary::GVFlags(Linkage, NoRename, IsNotViableToInline);
 }
 
 static GlobalValue::VisibilityTypes getDecodedVisibility(unsigned Val) {
@@ -2742,7 +2742,12 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       // Upgrade old metadata, which stored a global variable reference or a
       // ConstantInt here.
       Metadata *Expr = getMDOrNull(Record[9]);
-      uint64_t AlignInBits = (Record.size() > 11) ? Record[11] : 0;
+      uint32_t AlignInBits = 0;
+      if (Record.size() > 11) {
+        if (Record[11] > (uint64_t)std::numeric_limits<uint32_t>::max())
+          return error("Alignment value is too large");
+        AlignInBits = Record[11];
+      }
       GlobalVariable *Attach = nullptr;
       if (auto *CMD = dyn_cast_or_null<ConstantAsMetadata>(Expr)) {
         if (auto *GV = dyn_cast<GlobalVariable>(CMD->getValue())) {
@@ -2782,7 +2787,13 @@ std::error_code BitcodeReader::parseMetadata(bool ModuleLevel) {
       // this is newer version of record which doesn't have artifical tag.
       bool HasTag = !HasAlignment && Record.size() > 8;
       DINode::DIFlags Flags = static_cast<DINode::DIFlags>(Record[7 + HasTag]);
-      uint64_t AlignInBits = HasAlignment ? Record[8 + HasTag] : 0;
+      uint32_t AlignInBits = 0;
+      if (HasAlignment) {
+        if (Record[8 + HasTag] >
+            (uint64_t)std::numeric_limits<uint32_t>::max())
+          return error("Alignment value is too large");
+        AlignInBits = Record[8 + HasTag];
+      }
       MetadataList.assignValue(
           GET_OR_DISTINCT(DILocalVariable,
                           (Context, getMDOrNull(Record[1 + HasTag]),

@@ -30,19 +30,8 @@ TracePC TPC;
 void TracePC::HandleTrace(uint32_t *Guard, uintptr_t PC) {
   uint32_t Idx = *Guard;
   if (!Idx) return;
-  if (!PCs[Idx % kNumPCs])
-    PCs[Idx % kNumPCs] = PC;
-  uint8_t *CounterPtr = &Counters[Idx % kNumCounters];
-  uint8_t Counter = *CounterPtr;
-  if (UseCounters) {
-    if (Counter < 128)
-      *CounterPtr = Counter + 1;
-    else
-      *Guard = 0;
-  } else {
-    *CounterPtr = 1;
-    *Guard = 0;
-  }
+  PCs[Idx % kNumPCs] = PC;
+  Counters[Idx % kNumCounters]++;
 }
 
 size_t TracePC::GetTotalPCCoverage() {
@@ -68,14 +57,6 @@ void TracePC::PrintModuleInfo() {
   for (size_t i = 0; i < NumModules; i++)
     Printf("[%p, %p), ", Modules[i].Start, Modules[i].Stop);
   Printf("\n");
-}
-
-void TracePC::ResetGuards() {
-  uint32_t N = 0;
-  for (size_t M = 0; M < NumModules; M++)
-    for (uint32_t *X = Modules[M].Start, *End = Modules[M].Stop; X < End; X++)
-      *X = ++N;
-  assert(N == NumGuards);
 }
 
 size_t TracePC::FinalizeTrace(InputCorpus *C, size_t InputSize, bool Shrink) {
@@ -281,7 +262,10 @@ void TracePC::HandleCmp(void *PC, T Arg1, T Arg2) {
   uint64_t ArgXor = Arg1 ^ Arg2;
   uint64_t ArgDistance = __builtin_popcountl(ArgXor) + 1; // [1,65]
   uintptr_t Idx = ((PCuint & 4095) + 1) * ArgDistance;
-  TORCInsert(ArgXor, Arg1, Arg2);
+  if (sizeof(T) == 4)
+      TORC4.Insert(ArgXor, Arg1, Arg2);
+  else if (sizeof(T) == 8)
+      TORC8.Insert(ArgXor, Arg1, Arg2);
   HandleValueProfile(Idx);
 }
 
