@@ -74,7 +74,10 @@ ErrorOr<ELFYAML::Object *> ELFDumper<ELFT>::dump() {
   const Elf_Shdr *Symtab = nullptr;
 
   // Dump sections
-  for (const Elf_Shdr &Sec : Obj.sections()) {
+  auto SectionsOrErr = Obj.sections();
+  if (std::error_code EC = SectionsOrErr.getError())
+    return EC;
+  for (const Elf_Shdr &Sec : *SectionsOrErr) {
     switch (Sec.sh_type) {
     case ELF::SHT_NULL:
     case ELF::SHT_DYNSYM:
@@ -361,7 +364,10 @@ ErrorOr<ELFYAML::Group *> ELFDumper<ELFT>::dumpGroup(const Elf_Shdr *Shdr) {
   if (std::error_code EC = SymtabOrErr.getError())
     return EC;
   const Elf_Shdr *Symtab = *SymtabOrErr;
-  const Elf_Sym *symbol = Obj.getSymbol(Symtab, Shdr->sh_info);
+  ErrorOr<const Elf_Sym *> SymOrErr = Obj.getSymbol(Symtab, Shdr->sh_info);
+  if (std::error_code EC = SymOrErr.getError())
+    return EC;
+  const Elf_Sym *symbol = *SymOrErr;
   ErrorOr<StringRef> StrTabOrErr = Obj.getStringTableForSymtab(*Symtab);
   if (std::error_code EC = StrTabOrErr.getError())
     return EC;
