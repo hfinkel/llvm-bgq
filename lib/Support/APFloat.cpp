@@ -1761,8 +1761,10 @@ APFloat::remainder(const APFloat &rhs)
   bool ignored;
   fs = V.convertToInteger(x, parts * integerPartWidth, true,
                           rmNearestTiesToEven, &ignored);
-  if (fs==opInvalidOp)
+  if (fs==opInvalidOp) {
+    delete[] x;
     return fs;
+  }
 
   fs = V.convertFromZeroExtendedInteger(x, parts * integerPartWidth, true,
                                         rmNearestTiesToEven);
@@ -1801,8 +1803,10 @@ APFloat::mod(const APFloat &rhs)
     bool ignored;
     fs = V.convertToInteger(x, parts * integerPartWidth, true,
                             rmTowardZero, &ignored);
-    if (fs==opInvalidOp)
+    if (fs==opInvalidOp) {
+      delete[] x;
       return fs;
+    }
 
     fs = V.convertFromZeroExtendedInteger(x, parts * integerPartWidth, true,
                                           rmNearestTiesToEven);
