@@ -27,6 +27,7 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
@@ -2177,6 +2178,55 @@ SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
   SDValue CPILo =
     DAG.getTargetConstantPool(C, PtrVT, CP->getAlignment(), 0, MOLoFlag);
   return LowerLabelRef(CPIHi, CPILo, IsPIC, DAG);
+}
+
+// For 64-bit PowerPC, prefer the more compact relative encodings.
+// This trades 32 bits per jump table entry for one or two instructions
+// on the jump site.
+unsigned PPCTargetLowering::getJumpTableEncoding() const {
+  if (isJumpTableRelative())
+    return MachineJumpTableInfo::EK_LabelDifference32;
+
+  return TargetLowering::getJumpTableEncoding();
+}
+
+bool PPCTargetLowering::isJumpTableRelative() const {
+  if (Subtarget.isPPC64())
+    return true;
+  return TargetLowering::isJumpTableRelative();
+}
+
+SDValue PPCTargetLowering::getPICJumpTableRelocBase(SDValue Table,
+                                                    SelectionDAG &DAG) const {
+  if (!Subtarget.isPPC64())
+    return TargetLowering::getPICJumpTableRelocBase(Table, DAG);
+
+  switch (getTargetMachine().getCodeModel()) {
+  case CodeModel::Default:
+  case CodeModel::Small:
+  case CodeModel::Medium:
+    return TargetLowering::getPICJumpTableRelocBase(Table, DAG);
+  default:
+    return DAG.getNode(PPCISD::GlobalBaseReg, SDLoc(),
+                       getPointerTy(DAG.getDataLayout()));
+  }
+}
+
+const MCExpr *
+PPCTargetLowering::getPICJumpTableRelocBaseExpr(const MachineFunction *MF,
+                                                unsigned JTI,
+                                                MCContext &Ctx) const {
+  if (!Subtarget.isPPC64())
+    return TargetLowering::getPICJumpTableRelocBaseExpr(MF, JTI, Ctx);
+
+  switch (getTargetMachine().getCodeModel()) {
+  case CodeModel::Default:
+  case CodeModel::Small:
+  case CodeModel::Medium:
+    return TargetLowering::getPICJumpTableRelocBaseExpr(MF, JTI, Ctx);
+  default:
+    return MCSymbolRefExpr::create(MF->getPICBaseSymbol(), Ctx);
+  }
 }
 
 SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
@@ -9784,9 +9834,11 @@ static bool isConsecutiveLS(SDNode *N, LSBaseSDNode *Base,
     case Intrinsic::ppc_altivec_lvx:
     case Intrinsic::ppc_altivec_lvxl:
     case Intrinsic::ppc_vsx_lxvw4x:
+    case Intrinsic::ppc_vsx_lxvw4x_be:
       VT = MVT::v4i32;
       break;
     case Intrinsic::ppc_vsx_lxvd2x:
+    case Intrinsic::ppc_vsx_lxvd2x_be:
       VT = MVT::v2f64;
       break;
     case Intrinsic::ppc_altivec_lvebx:
@@ -9831,6 +9883,12 @@ static bool isConsecutiveLS(SDNode *N, LSBaseSDNode *Base,
       VT = MVT::v4i32;
       break;
     case Intrinsic::ppc_vsx_stxvd2x:
+      VT = MVT::v2f64;
+      break;
+    case Intrinsic::ppc_vsx_stxvw4x_be:
+      VT = MVT::v4i32;
+      break;
+    case Intrinsic::ppc_vsx_stxvd2x_be:
       VT = MVT::v2f64;
       break;
     case Intrinsic::ppc_altivec_stvebx:
@@ -9918,6 +9976,87 @@ static bool findConsecutiveLoad(LoadSDNode *LD, SelectionDAG &DAG) {
   return false;
 }
 
+
+/// This function is called when we have proved that a SETCC node can be replaced
+/// by subtraction (and other supporting instructions) so that the result of
+/// comparison is kept in a GPR instead of CR. This function is purely for
+/// codegen purposes and has some flags to guide the codegen process.
+static SDValue generateEquivalentSub(SDNode *N, int Size, bool Complement,
+                                     bool Swap, SDLoc &DL, SelectionDAG &DAG) {
+
+  assert(N->getOpcode() == ISD::SETCC && "ISD::SETCC Expected.");
+
+  // Zero extend the operands to the largest legal integer. Originally, they
+  // must be of a strictly smaller size.
+  auto Op0 = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, N->getOperand(0),
+                         DAG.getConstant(Size, DL, MVT::i32));
+  auto Op1 = DAG.getNode(ISD::ZERO_EXTEND, DL, MVT::i64, N->getOperand(1),
+                         DAG.getConstant(Size, DL, MVT::i32));
+
+  // Swap if needed. Depends on the condition code.
+  if (Swap)
+    std::swap(Op0, Op1);
+
+  // Subtract extended integers.
+  auto SubNode = DAG.getNode(ISD::SUB, DL, MVT::i64, Op0, Op1);
+
+  // Move the sign bit to the least significant position and zero out the rest.
+  // Now the least significant bit carries the result of original comparison.
+  auto Shifted = DAG.getNode(ISD::SRL, DL, MVT::i64, SubNode,
+                             DAG.getConstant(Size - 1, DL, MVT::i32));
+  auto Final = Shifted;
+
+  // Complement the result if needed. Based on the condition code.
+  if (Complement)
+    Final = DAG.getNode(ISD::XOR, DL, MVT::i64, Shifted,
+                        DAG.getConstant(1, DL, MVT::i64));
+
+  return DAG.getNode(ISD::TRUNCATE, DL, MVT::i1, Final);
+}
+
+SDValue PPCTargetLowering::ConvertSETCCToSubtract(SDNode *N,
+                                                  DAGCombinerInfo &DCI) const {
+
+  assert(N->getOpcode() == ISD::SETCC && "ISD::SETCC Expected.");
+
+  SelectionDAG &DAG = DCI.DAG;
+  SDLoc DL(N);
+
+  // Size of integers being compared has a critical role in the following
+  // analysis, so we prefer to do this when all types are legal.
+  if (!DCI.isAfterLegalizeVectorOps())
+    return SDValue();
+
+  // If all users of SETCC extend its value to a legal integer type
+  // then we replace SETCC with a subtraction
+  for (SDNode::use_iterator UI = N->use_begin(),
+       UE = N->use_end(); UI != UE; ++UI) {
+    if (UI->getOpcode() != ISD::ZERO_EXTEND)
+      return SDValue();
+  }
+
+  ISD::CondCode CC = cast<CondCodeSDNode>(N->getOperand(2))->get();
+  auto OpSize = N->getOperand(0).getValueSizeInBits();
+
+  unsigned Size = DAG.getDataLayout().getLargestLegalIntTypeSizeInBits();
+
+  if (OpSize < Size) {
+    switch (CC) {
+    default: break;
+    case ISD::SETULT:
+      return generateEquivalentSub(N, Size, false, false, DL, DAG);
+    case ISD::SETULE:
+      return generateEquivalentSub(N, Size, true, true, DL, DAG);
+    case ISD::SETUGT:
+      return generateEquivalentSub(N, Size, false, true, DL, DAG);
+    case ISD::SETUGE:
+      return generateEquivalentSub(N, Size, true, false, DL, DAG);
+    }
+  }
+
+  return SDValue();
+}
+
 SDValue PPCTargetLowering::DAGCombineTruncBoolExt(SDNode *N,
                                                   DAGCombinerInfo &DCI) const {
   SelectionDAG &DAG = DCI.DAG;
@@ -9959,7 +10098,8 @@ SDValue PPCTargetLowering::DAGCombineTruncBoolExt(SDNode *N,
                                  APInt::getHighBitsSet(OpBits, OpBits-1)) ||
           !DAG.MaskedValueIsZero(N->getOperand(1),
                                  APInt::getHighBitsSet(OpBits, OpBits-1)))
-        return SDValue();
+        return (N->getOpcode() == ISD::SETCC ? ConvertSETCCToSubtract(N, DCI)
+                                             : SDValue());
     } else {
       // This is neither a signed nor an unsigned comparison, just make sure
       // that the high bits are equal.
@@ -10674,6 +10814,14 @@ SDValue PPCTargetLowering::expandVSXLoadForLE(SDNode *N,
   }
 
   MVT VecTy = N->getValueType(0).getSimpleVT();
+
+  // Do not expand to PPCISD::LXVD2X + PPCISD::XXSWAPD when the load is
+  // aligned and the type is a vector with elements up to 4 bytes
+  if (Subtarget.needsSwapsForVSXMemOps() && !(MMO->getAlignment()%16)
+      && VecTy.getScalarSizeInBits() <= 32 ) {
+    return SDValue();
+  }
+
   SDValue LoadOps[] = { Chain, Base };
   SDValue Load = DAG.getMemIntrinsicNode(PPCISD::LXVD2X, dl,
                                          DAG.getVTList(MVT::v2f64, MVT::Other),
@@ -10737,6 +10885,13 @@ SDValue PPCTargetLowering::expandVSXStoreForLE(SDNode *N,
 
   SDValue Src = N->getOperand(SrcOpnd);
   MVT VecTy = Src.getValueType().getSimpleVT();
+
+  // Do not expand to PPCISD::XXSWAPD and PPCISD::STXVD2X when the load is
+  // aligned and the type is a vector with elements up to 4 bytes
+  if (Subtarget.needsSwapsForVSXMemOps() && !(MMO->getAlignment()%16)
+      && VecTy.getScalarSizeInBits() <= 32 ) {
+    return SDValue();
+  }
 
   // All stores are done as v2f64 and possible bit cast.
   if (VecTy != MVT::v2f64) {

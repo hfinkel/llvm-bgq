@@ -863,8 +863,10 @@ static void trackRegDefsUses(const MachineInstr &MI, BitVector &ModifiedRegs,
     if (!Reg)
       continue;
     if (MO.isDef()) {
-      for (MCRegAliasIterator AI(Reg, TRI, true); AI.isValid(); ++AI)
-        ModifiedRegs.set(*AI);
+      // WZR/XZR are not modified even when used as a destination register.
+      if (Reg != AArch64::WZR && Reg != AArch64::XZR)
+        for (MCRegAliasIterator AI(Reg, TRI, true); AI.isValid(); ++AI)
+          ModifiedRegs.set(*AI);
     } else {
       assert(MO.isUse() && "Reg operand not a def and not a use?!?");
       for (MCRegAliasIterator AI(Reg, TRI, true); AI.isValid(); ++AI)
@@ -1699,16 +1701,17 @@ bool AArch64LoadStoreOpt::runOnMachineFunction(MachineFunction &Fn) {
   UsedRegs.resize(TRI->getNumRegs());
 
   bool Modified = false;
-  bool enableNarrowZeroStOpt =
-      Subtarget->mergeNarrowStores() && !Subtarget->requiresStrictAlign();
+  bool enableNarrowZeroStOpt = !Subtarget->requiresStrictAlign();
   for (auto &MBB : Fn)
     Modified |= optimizeBlock(MBB, enableNarrowZeroStOpt);
 
   return Modified;
 }
 
-// FIXME: Do we need/want a pre-alloc pass like ARM has to try to keep
-// loads and stores near one another?
+// FIXME: Do we need/want a pre-alloc pass like ARM has to try to keep loads and
+// stores near one another?  Note: The pre-RA instruction scheduler already has
+// hooks to try and schedule pairable loads/stores together to improve pairing
+// opportunities.  Thus, pre-RA pairing pass may not be worth the effort.
 
 // FIXME: When pairing store instructions it's very possible for this pass to
 // hoist a store with a KILL marker above another use (without a KILL marker).

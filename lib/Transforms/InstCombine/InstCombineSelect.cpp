@@ -162,13 +162,12 @@ Instruction *InstCombiner::foldSelectOpOp(SelectInst &SI, Instruction *TI,
                             TI->getType());
   }
 
-  // TODO: This function ends awkwardly in unreachable - fix to be more normal.
-
   // Only handle binary operators with one-use here. As with the cast case
   // above, it may be possible to relax the one-use constraint, but that needs
   // be examined carefully since it may not reduce the total number of
   // instructions.
-  if (!isa<BinaryOperator>(TI) || !TI->hasOneUse() || !FI->hasOneUse())
+  BinaryOperator *BO = dyn_cast<BinaryOperator>(TI);
+  if (!BO || !TI->hasOneUse() || !FI->hasOneUse())
     return nullptr;
 
   // Figure out if the operations have any operands in common.
@@ -203,14 +202,9 @@ Instruction *InstCombiner::foldSelectOpOp(SelectInst &SI, Instruction *TI,
   // If we reach here, they do have operations in common.
   Value *NewSI = Builder->CreateSelect(SI.getCondition(), OtherOpT, OtherOpF,
                                        SI.getName() + ".v", &SI);
-
-  if (BinaryOperator *BO = dyn_cast<BinaryOperator>(TI)) {
-    if (MatchIsOpZero)
-      return BinaryOperator::Create(BO->getOpcode(), MatchOp, NewSI);
-    else
-      return BinaryOperator::Create(BO->getOpcode(), NewSI, MatchOp);
-  }
-  llvm_unreachable("Shouldn't get here");
+  Value *Op0 = MatchIsOpZero ? MatchOp : NewSI;
+  Value *Op1 = MatchIsOpZero ? NewSI : MatchOp;
+  return BinaryOperator::Create(BO->getOpcode(), Op0, Op1);
 }
 
 static bool isSelect01(Constant *C1, Constant *C2) {
@@ -506,9 +500,51 @@ static bool adjustMinMax(SelectInst &Sel, ICmpInst &Cmp) {
   return true;
 }
 
+/// If this is an integer min/max where the select's 'true' operand is a
+/// constant, canonicalize that constant to the 'false' operand:
+/// select (icmp Pred X, C), C, X --> select (icmp Pred' X, C), X, C
+static Instruction *
+canonicalizeMinMaxWithConstant(SelectInst &Sel, ICmpInst &Cmp,
+                               InstCombiner::BuilderTy &Builder) {
+  // TODO: We should also canonicalize min/max when the select has a different
+  // constant value than the cmp constant, but we need to fix the backend first.
+  if (!Cmp.hasOneUse() || !isa<Constant>(Cmp.getOperand(1)) ||
+      !isa<Constant>(Sel.getTrueValue()) ||
+      isa<Constant>(Sel.getFalseValue()) ||
+      Cmp.getOperand(1) != Sel.getTrueValue())
+    return nullptr;
+
+  // Canonicalize the compare predicate based on whether we have min or max.
+  Value *LHS, *RHS;
+  ICmpInst::Predicate NewPred;
+  SelectPatternResult SPR = matchSelectPattern(&Sel, LHS, RHS);
+  switch (SPR.Flavor) {
+  case SPF_SMIN: NewPred = ICmpInst::ICMP_SLT; break;
+  case SPF_UMIN: NewPred = ICmpInst::ICMP_ULT; break;
+  case SPF_SMAX: NewPred = ICmpInst::ICMP_SGT; break;
+  case SPF_UMAX: NewPred = ICmpInst::ICMP_UGT; break;
+  default: return nullptr;
+  }
+
+  // Canonicalize the constant to the right side.
+  if (isa<Constant>(LHS))
+    std::swap(LHS, RHS);
+
+  Value *NewCmp = Builder.CreateICmp(NewPred, LHS, RHS);
+  SelectInst *NewSel = SelectInst::Create(NewCmp, LHS, RHS);
+  NewSel->copyMetadata(Sel);
+
+  // We swapped the select operands, so swap the metadata too.
+  NewSel->swapProfMetadata();
+  return NewSel;
+}
+
 /// Visit a SelectInst that has an ICmpInst as its first operand.
 Instruction *InstCombiner::foldSelectInstWithICmp(SelectInst &SI,
                                                   ICmpInst *ICI) {
+  if (Instruction *NewSel = canonicalizeMinMaxWithConstant(SI, *ICI, *Builder))
+    return NewSel;
+
   bool Changed = adjustMinMax(SI, *ICI);
 
   ICmpInst::Predicate Pred = ICI->getPredicate();

@@ -2294,7 +2294,7 @@ void SelectionDAGBuilder::visitLandingPad(const LandingPadInst &LP) {
 
   MachineBasicBlock *MBB = FuncInfo.MBB;
   MachineModuleInfo &MMI = DAG.getMachineFunction().getMMI();
-  AddLandingPadInfo(LP, MMI, MBB);
+  addLandingPadInfo(LP, MMI, *MBB);
 
   // If there aren't registers to copy the values into (e.g., during SjLj
   // exceptions), then don't bother to create these DAG nodes.
@@ -4061,8 +4061,12 @@ void SelectionDAGBuilder::visitAtomicStore(const StoreInst &I) {
 /// node.
 void SelectionDAGBuilder::visitTargetIntrinsic(const CallInst &I,
                                                unsigned Intrinsic) {
-  bool HasChain = !I.doesNotAccessMemory();
-  bool OnlyLoad = HasChain && I.onlyReadsMemory();
+  // Ignore the callsite's attributes. A specific call site may be marked with
+  // readnone, but the lowering code will expect the chain based on the
+  // definition.
+  const Function *F = I.getCalledFunction();
+  bool HasChain = !F->doesNotAccessMemory();
+  bool OnlyLoad = HasChain && F->onlyReadsMemory();
 
   // Build the operand list.
   SmallVector<SDValue, 8> Ops;
@@ -6289,7 +6293,7 @@ void SelectionDAGBuilder::visitCall(const CallInst &I) {
   }
 
   MachineModuleInfo &MMI = DAG.getMachineFunction().getMMI();
-  ComputeUsesVAFloatArgument(I, &MMI);
+  computeUsesVAFloatArgument(I, MMI);
 
   const char *RenameFn = nullptr;
   if (Function *F = I.getCalledFunction()) {

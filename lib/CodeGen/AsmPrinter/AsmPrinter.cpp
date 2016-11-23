@@ -55,10 +55,15 @@ using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
 
-static const char *const DWARFGroupName = "DWARF Emission";
-static const char *const DbgTimerName = "Debug Info Emission";
-static const char *const EHTimerName = "DWARF Exception Writer";
-static const char *const CodeViewLineTablesGroupName = "CodeView Line Tables";
+static const char *const DWARFGroupName = "dwarf";
+static const char *const DWARFGroupDescription = "DWARF Emission";
+static const char *const DbgTimerName = "emit";
+static const char *const DbgTimerDescription = "Debug Info Emission";
+static const char *const EHTimerName = "write_exception";
+static const char *const EHTimerDescription = "DWARF Exception Writer";
+static const char *const CodeViewLineTablesGroupName = "linetables";
+static const char *const CodeViewLineTablesGroupDescription =
+  "CodeView Line Tables";
 
 STATISTIC(EmittedInsts, "Number of machine instrs printed");
 
@@ -242,15 +247,18 @@ bool AsmPrinter::doInitialization(Module &M) {
 
   if (MAI->doesSupportDebugInformation()) {
     bool EmitCodeView = MMI->getModule()->getCodeViewFlag();
-    if (EmitCodeView && TM.getTargetTriple().isKnownWindowsMSVCEnvironment()) {
+    if (EmitCodeView && (TM.getTargetTriple().isKnownWindowsMSVCEnvironment() ||
+                         TM.getTargetTriple().isWindowsItaniumEnvironment())) {
       Handlers.push_back(HandlerInfo(new CodeViewDebug(this),
-                                     DbgTimerName,
-                                     CodeViewLineTablesGroupName));
+                                     DbgTimerName, DbgTimerDescription,
+                                     CodeViewLineTablesGroupName,
+                                     CodeViewLineTablesGroupDescription));
     }
     if (!EmitCodeView || MMI->getModule()->getDwarfVersion()) {
       DD = new DwarfDebug(this, &M);
       DD->beginModule();
-      Handlers.push_back(HandlerInfo(DD, DbgTimerName, DWARFGroupName));
+      Handlers.push_back(HandlerInfo(DD, DbgTimerName, DbgTimerDescription,
+                                     DWARFGroupName, DWARFGroupDescription));
     }
   }
 
@@ -278,7 +286,8 @@ bool AsmPrinter::doInitialization(Module &M) {
     break;
   }
   if (ES)
-    Handlers.push_back(HandlerInfo(ES, EHTimerName, DWARFGroupName));
+    Handlers.push_back(HandlerInfo(ES, EHTimerName, EHTimerDescription,
+                                   DWARFGroupName, DWARFGroupDescription));
   return false;
 }
 
@@ -336,7 +345,7 @@ void AsmPrinter::getNameWithPrefix(SmallVectorImpl<char> &Name,
 }
 
 MCSymbol *AsmPrinter::getSymbol(const GlobalValue *GV) const {
-  return TM.getSymbol(GV, getObjFileLowering().getMangler());
+  return TM.getSymbol(GV);
 }
 
 /// EmitGlobalVariable - Emit the specified global variable to the .s file.
@@ -399,7 +408,9 @@ void AsmPrinter::EmitGlobalVariable(const GlobalVariable *GV) {
   unsigned AlignLog = getGVAlignmentLog2(GV, DL);
 
   for (const HandlerInfo &HI : Handlers) {
-    NamedRegionTimer T(HI.TimerName, HI.TimerGroupName, TimePassesIsEnabled);
+    NamedRegionTimer T(HI.TimerName, HI.TimerDescription,
+                       HI.TimerGroupName, HI.TimerGroupDescription,
+                       TimePassesIsEnabled);
     HI.Handler->setSymbolSize(GVSym, Size);
   }
 
@@ -588,7 +599,8 @@ void AsmPrinter::EmitFunctionHeader() {
 
   // Emit pre-function debug and/or EH information.
   for (const HandlerInfo &HI : Handlers) {
-    NamedRegionTimer T(HI.TimerName, HI.TimerGroupName, TimePassesIsEnabled);
+    NamedRegionTimer T(HI.TimerName, HI.TimerDescription, HI.TimerGroupName,
+                       HI.TimerGroupDescription, TimePassesIsEnabled);
     HI.Handler->beginFunction(MF);
   }
 
@@ -852,7 +864,8 @@ void AsmPrinter::EmitFunctionBody() {
 
       if (ShouldPrintDebugScopes) {
         for (const HandlerInfo &HI : Handlers) {
-          NamedRegionTimer T(HI.TimerName, HI.TimerGroupName,
+          NamedRegionTimer T(HI.TimerName, HI.TimerDescription,
+                             HI.TimerGroupName, HI.TimerGroupDescription,
                              TimePassesIsEnabled);
           HI.Handler->beginInstruction(&MI);
         }
@@ -896,7 +909,8 @@ void AsmPrinter::EmitFunctionBody() {
 
       if (ShouldPrintDebugScopes) {
         for (const HandlerInfo &HI : Handlers) {
-          NamedRegionTimer T(HI.TimerName, HI.TimerGroupName,
+          NamedRegionTimer T(HI.TimerName, HI.TimerDescription,
+                             HI.TimerGroupName, HI.TimerGroupDescription,
                              TimePassesIsEnabled);
           HI.Handler->endInstruction();
         }
@@ -954,7 +968,8 @@ void AsmPrinter::EmitFunctionBody() {
   }
 
   for (const HandlerInfo &HI : Handlers) {
-    NamedRegionTimer T(HI.TimerName, HI.TimerGroupName, TimePassesIsEnabled);
+    NamedRegionTimer T(HI.TimerName, HI.TimerDescription, HI.TimerGroupName,
+                       HI.TimerGroupDescription, TimePassesIsEnabled);
     HI.Handler->markFunctionEnd();
   }
 
@@ -963,7 +978,8 @@ void AsmPrinter::EmitFunctionBody() {
 
   // Emit post-function debug and/or EH information.
   for (const HandlerInfo &HI : Handlers) {
-    NamedRegionTimer T(HI.TimerName, HI.TimerGroupName, TimePassesIsEnabled);
+    NamedRegionTimer T(HI.TimerName, HI.TimerDescription, HI.TimerGroupName,
+                       HI.TimerGroupDescription, TimePassesIsEnabled);
     HI.Handler->endFunction(MF);
   }
   MMI->EndFunction();
@@ -1154,8 +1170,8 @@ bool AsmPrinter::doFinalization(Module &M) {
 
   // Finalize debug and EH information.
   for (const HandlerInfo &HI : Handlers) {
-    NamedRegionTimer T(HI.TimerName, HI.TimerGroupName,
-                       TimePassesIsEnabled);
+    NamedRegionTimer T(HI.TimerName, HI.TimerDescription, HI.TimerGroupName,
+                       HI.TimerGroupDescription, TimePassesIsEnabled);
     HI.Handler->endModule();
     delete HI.Handler;
   }

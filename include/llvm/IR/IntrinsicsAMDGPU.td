@@ -107,6 +107,9 @@ def int_amdgcn_dispatch_id :
 def int_amdgcn_s_barrier : GCCBuiltin<"__builtin_amdgcn_s_barrier">,
   Intrinsic<[], [], [IntrConvergent]>;
 
+def int_amdgcn_wave_barrier : GCCBuiltin<"__builtin_amdgcn_wave_barrier">,
+  Intrinsic<[], [], [IntrConvergent]>;
+
 def int_amdgcn_s_waitcnt : Intrinsic<[], [llvm_i32_ty], []>;
 
 def int_amdgcn_div_scale : Intrinsic<
@@ -178,7 +181,7 @@ def int_amdgcn_frexp_mant : Intrinsic<
 >;
 
 def int_amdgcn_frexp_exp : Intrinsic<
-  [llvm_i32_ty], [llvm_anyfloat_ty], [IntrNoMem]
+  [llvm_anyint_ty], [llvm_anyfloat_ty], [IntrNoMem]
 >;
 
 // v_fract is buggy on SI/CI. It mishandles infinities, may return 1.0

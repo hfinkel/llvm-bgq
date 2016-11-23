@@ -120,8 +120,10 @@ static cl::opt<LinkageNameOption>
                                             "Abstract subprograms")),
                       cl::init(DefaultLinkageNames));
 
-static const char *const DWARFGroupName = "DWARF Emission";
-static const char *const DbgTimerName = "DWARF Debug Writer";
+static const char *const DWARFGroupName = "dwarf";
+static const char *const DWARFGroupDescription = "DWARF Emission";
+static const char *const DbgTimerName = "writer";
+static const char *const DbgTimerDescription = "DWARF Debug Writer";
 
 void DebugLocDwarfExpression::EmitOp(uint8_t Op, const char *Comment) {
   BS.EmitInt8(
@@ -464,7 +466,8 @@ void DwarfDebug::constructAndAddImportedEntityDIE(DwarfCompileUnit &TheCU,
 // global DIEs and emit initial debug info sections. This is invoked by
 // the target AsmPrinter.
 void DwarfDebug::beginModule() {
-  NamedRegionTimer T(DbgTimerName, DWARFGroupName, TimePassesIsEnabled);
+  NamedRegionTimer T(DbgTimerName, DbgTimerDescription, DWARFGroupName,
+                     DWARFGroupDescription, TimePassesIsEnabled);
   if (DisableDebugInfoPrinting)
     return;
 
@@ -1004,29 +1007,34 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   assert(CurMI);
 
   // Check if source location changes, but ignore DBG_VALUE locations.
-  if (!MI->isDebugValue()) {
-    const DebugLoc &DL = MI->getDebugLoc();
-    if (DL != PrevInstLoc) {
-      if (DL) {
-        unsigned Flags = 0;
-        PrevInstLoc = DL;
-        if (DL == PrologEndLoc) {
-          Flags |= DWARF2_FLAG_PROLOGUE_END;
-          PrologEndLoc = DebugLoc();
-          Flags |= DWARF2_FLAG_IS_STMT;
-        }
-        if (DL.getLine() !=
-            Asm->OutStreamer->getContext().getCurrentDwarfLoc().getLine())
-          Flags |= DWARF2_FLAG_IS_STMT;
+  if (MI->isDebugValue())
+    return;
+  const DebugLoc &DL = MI->getDebugLoc();
+  if (DL == PrevInstLoc)
+    return;
 
-        const MDNode *Scope = DL.getScope();
-        recordSourceLine(DL.getLine(), DL.getCol(), Scope, Flags);
-      } else if (UnknownLocations) {
-        PrevInstLoc = DL;
-        recordSourceLine(0, 0, nullptr, 0);
-      }
+  if (!DL) {
+    // We have an unspecified location, which might want to be line 0.
+    if (UnknownLocations) {
+      PrevInstLoc = DL;
+      recordSourceLine(0, 0, nullptr, 0);
     }
+    return;
   }
+
+  // We have a new, explicit location.
+  unsigned Flags = 0;
+  PrevInstLoc = DL;
+  if (DL == PrologEndLoc) {
+    Flags |= DWARF2_FLAG_PROLOGUE_END | DWARF2_FLAG_IS_STMT;
+    PrologEndLoc = DebugLoc();
+  }
+  if (DL.getLine() !=
+      Asm->OutStreamer->getContext().getCurrentDwarfLoc().getLine())
+    Flags |= DWARF2_FLAG_IS_STMT;
+
+  const MDNode *Scope = DL.getScope();
+  recordSourceLine(DL.getLine(), DL.getCol(), Scope, Flags);
 }
 
 static DebugLoc findPrologueEndLoc(const MachineFunction *MF) {

@@ -550,7 +550,7 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::MOVSX64rr8,      X86::MOVSX64rm8,          0 },
     { X86::MOVUPDrr,        X86::MOVUPDrm,            TB_ALIGN_16 },
     { X86::MOVUPSrr,        X86::MOVUPSrm,            0 },
-    { X86::MOVZPQILo2PQIrr, X86::MOVZPQILo2PQIrm,     TB_ALIGN_16 },
+    { X86::MOVZPQILo2PQIrr, X86::MOVQI2PQIrm,         TB_NO_REVERSE },
     { X86::MOVZX16rr8,      X86::MOVZX16rm8,          0 },
     { X86::MOVZX32rr16,     X86::MOVZX32rm16,         0 },
     { X86::MOVZX32_NOREXrr8, X86::MOVZX32_NOREXrm8,   0 },
@@ -641,11 +641,11 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VCVTSS2SIrr,     X86::VCVTSS2SIrm,         0 },
     { X86::VCVTDQ2PDrr,     X86::VCVTDQ2PDrm,         0 },
     { X86::VCVTDQ2PSrr,     X86::VCVTDQ2PSrm,         0 },
-    { X86::VCVTPD2DQrr,     X86::VCVTPD2DQXrm,        0 },
-    { X86::VCVTPD2PSrr,     X86::VCVTPD2PSXrm,        0 },
+    { X86::VCVTPD2DQrr,     X86::VCVTPD2DQrm,         0 },
+    { X86::VCVTPD2PSrr,     X86::VCVTPD2PSrm,         0 },
     { X86::VCVTPS2DQrr,     X86::VCVTPS2DQrm,         0 },
     { X86::VCVTPS2PDrr,     X86::VCVTPS2PDrm,         0 },
-    { X86::VCVTTPD2DQrr,    X86::VCVTTPD2DQXrm,       0 },
+    { X86::VCVTTPD2DQrr,    X86::VCVTTPD2DQrm,        0 },
     { X86::VCVTTPS2DQrr,    X86::VCVTTPS2DQrm,        0 },
     { X86::VMOV64toPQIrr,   X86::VMOVQI2PQIrm,        0 },
     { X86::VMOV64toSDrr,    X86::VMOV64toSDrm,        0 },
@@ -659,7 +659,7 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VMOVSHDUPrr,     X86::VMOVSHDUPrm,         0 },
     { X86::VMOVUPDrr,       X86::VMOVUPDrm,           0 },
     { X86::VMOVUPSrr,       X86::VMOVUPSrm,           0 },
-    { X86::VMOVZPQILo2PQIrr,X86::VMOVZPQILo2PQIrm,    TB_ALIGN_16 },
+    { X86::VMOVZPQILo2PQIrr,X86::VMOVQI2PQIrm,        TB_NO_REVERSE },
     { X86::VPABSBrr,        X86::VPABSBrm,            0 },
     { X86::VPABSDrr,        X86::VPABSDrm,            0 },
     { X86::VPABSWrr,        X86::VPABSWrm,            0 },
@@ -855,6 +855,7 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
 
     // AVX-512 foldable instructions
     { X86::VMOV64toPQIZrr,   X86::VMOVQI2PQIZrm,      0 },
+    { X86::VMOVZPQILo2PQIZrr,X86::VMOVQI2PQIZrm,      TB_NO_REVERSE },
     { X86::VMOVDI2SSZrr,     X86::VMOVDI2SSZrm,       0 },
     { X86::VMOVAPDZrr,       X86::VMOVAPDZrm,         TB_ALIGN_64 },
     { X86::VMOVAPSZrr,       X86::VMOVAPSZrm,         TB_ALIGN_64 },
@@ -3532,6 +3533,92 @@ static bool commuteVPTERNLOG(MachineInstr &MI, unsigned SrcOpIdx1,
   return true;
 }
 
+// Returns true if this is a VPERMI2 or VPERMT2 instrution that can be
+// commuted.
+static bool isCommutableVPERMV3Instruction(unsigned Opcode) {
+#define VPERM_CASES(Suffix) \
+  case X86::VPERMI2##Suffix##128rr:    case X86::VPERMT2##Suffix##128rr:    \
+  case X86::VPERMI2##Suffix##256rr:    case X86::VPERMT2##Suffix##256rr:    \
+  case X86::VPERMI2##Suffix##rr:       case X86::VPERMT2##Suffix##rr:       \
+  case X86::VPERMI2##Suffix##128rm:    case X86::VPERMT2##Suffix##128rm:    \
+  case X86::VPERMI2##Suffix##256rm:    case X86::VPERMT2##Suffix##256rm:    \
+  case X86::VPERMI2##Suffix##rm:       case X86::VPERMT2##Suffix##rm:       \
+  case X86::VPERMI2##Suffix##128rrkz:  case X86::VPERMT2##Suffix##128rrkz:  \
+  case X86::VPERMI2##Suffix##256rrkz:  case X86::VPERMT2##Suffix##256rrkz:  \
+  case X86::VPERMI2##Suffix##rrkz:     case X86::VPERMT2##Suffix##rrkz:     \
+  case X86::VPERMI2##Suffix##128rmkz:  case X86::VPERMT2##Suffix##128rmkz:  \
+  case X86::VPERMI2##Suffix##256rmkz:  case X86::VPERMT2##Suffix##256rmkz:  \
+  case X86::VPERMI2##Suffix##rmkz:     case X86::VPERMT2##Suffix##rmkz:
+
+#define VPERM_CASES_BROADCAST(Suffix) \
+  VPERM_CASES(Suffix) \
+  case X86::VPERMI2##Suffix##128rmb:   case X86::VPERMT2##Suffix##128rmb:   \
+  case X86::VPERMI2##Suffix##256rmb:   case X86::VPERMT2##Suffix##256rmb:   \
+  case X86::VPERMI2##Suffix##rmb:      case X86::VPERMT2##Suffix##rmb:      \
+  case X86::VPERMI2##Suffix##128rmbkz: case X86::VPERMT2##Suffix##128rmbkz: \
+  case X86::VPERMI2##Suffix##256rmbkz: case X86::VPERMT2##Suffix##256rmbkz: \
+  case X86::VPERMI2##Suffix##rmbkz:    case X86::VPERMT2##Suffix##rmbkz:
+
+  switch (Opcode) {
+  default: return false;
+  VPERM_CASES(B)
+  VPERM_CASES_BROADCAST(D)
+  VPERM_CASES_BROADCAST(PD)
+  VPERM_CASES_BROADCAST(PS)
+  VPERM_CASES_BROADCAST(Q)
+  VPERM_CASES(W)
+    return true;
+  }
+#undef VPERM_CASES_BROADCAST
+#undef VPERM_CASES
+}
+
+// Returns commuted opcode for VPERMI2 and VPERMT2 instructions by switching
+// from the I opcod to the T opcode and vice versa.
+static unsigned getCommutedVPERMV3Opcode(unsigned Opcode) {
+#define VPERM_CASES(Orig, New) \
+  case X86::Orig##128rr:    return X86::New##128rr;   \
+  case X86::Orig##128rrkz:  return X86::New##128rrkz; \
+  case X86::Orig##128rm:    return X86::New##128rm;   \
+  case X86::Orig##128rmkz:  return X86::New##128rmkz; \
+  case X86::Orig##256rr:    return X86::New##256rr;   \
+  case X86::Orig##256rrkz:  return X86::New##256rrkz; \
+  case X86::Orig##256rm:    return X86::New##256rm;   \
+  case X86::Orig##256rmkz:  return X86::New##256rmkz; \
+  case X86::Orig##rr:       return X86::New##rr;      \
+  case X86::Orig##rrkz:     return X86::New##rrkz;    \
+  case X86::Orig##rm:       return X86::New##rm;      \
+  case X86::Orig##rmkz:     return X86::New##rmkz;
+
+#define VPERM_CASES_BROADCAST(Orig, New) \
+  VPERM_CASES(Orig, New) \
+  case X86::Orig##128rmb:   return X86::New##128rmb;   \
+  case X86::Orig##128rmbkz: return X86::New##128rmbkz; \
+  case X86::Orig##256rmb:   return X86::New##256rmb;   \
+  case X86::Orig##256rmbkz: return X86::New##256rmbkz; \
+  case X86::Orig##rmb:      return X86::New##rmb;      \
+  case X86::Orig##rmbkz:    return X86::New##rmbkz;
+
+  switch (Opcode) {
+  VPERM_CASES(VPERMI2B, VPERMT2B)
+  VPERM_CASES_BROADCAST(VPERMI2D,  VPERMT2D)
+  VPERM_CASES_BROADCAST(VPERMI2PD, VPERMT2PD)
+  VPERM_CASES_BROADCAST(VPERMI2PS, VPERMT2PS)
+  VPERM_CASES_BROADCAST(VPERMI2Q,  VPERMT2Q)
+  VPERM_CASES(VPERMI2W, VPERMT2W)
+  VPERM_CASES(VPERMT2B, VPERMI2B)
+  VPERM_CASES_BROADCAST(VPERMT2D,  VPERMI2D)
+  VPERM_CASES_BROADCAST(VPERMT2PD, VPERMI2PD)
+  VPERM_CASES_BROADCAST(VPERMT2PS, VPERMI2PS)
+  VPERM_CASES_BROADCAST(VPERMT2Q,  VPERMI2Q)
+  VPERM_CASES(VPERMT2W, VPERMI2W)
+  }
+
+  llvm_unreachable("Unreachable!");
+#undef VPERM_CASES_BROADCAST
+#undef VPERM_CASES
+}
+
 MachineInstr *X86InstrInfo::commuteInstructionImpl(MachineInstr &MI, bool NewMI,
                                                    unsigned OpIdx1,
                                                    unsigned OpIdx2) const {
@@ -3853,7 +3940,15 @@ MachineInstr *X86InstrInfo::commuteInstructionImpl(MachineInstr &MI, bool NewMI,
     return TargetInstrInfo::commuteInstructionImpl(WorkingMI, /*NewMI=*/false,
                                                    OpIdx1, OpIdx2);
   }
-  default:
+  default: {
+    if (isCommutableVPERMV3Instruction(MI.getOpcode())) {
+      unsigned Opc = getCommutedVPERMV3Opcode(MI.getOpcode());
+      auto &WorkingMI = cloneIfNew(MI);
+      WorkingMI.setDesc(get(Opc));
+      return TargetInstrInfo::commuteInstructionImpl(WorkingMI, /*NewMI=*/false,
+                                                     OpIdx1, OpIdx2);
+    }
+
     const X86InstrFMA3Group *FMA3Group =
         X86InstrFMA3Info::getFMA3Group(MI.getOpcode());
     if (FMA3Group) {
@@ -3868,6 +3963,7 @@ MachineInstr *X86InstrInfo::commuteInstructionImpl(MachineInstr &MI, bool NewMI,
     }
 
     return TargetInstrInfo::commuteInstructionImpl(MI, NewMI, OpIdx1, OpIdx2);
+  }
   }
 }
 
@@ -4040,12 +4136,26 @@ bool X86InstrInfo::findCommutedOpIndices(MachineInstr &MI, unsigned &SrcOpIdx1,
     // Handled masked instructions since we need to skip over the mask input
     // and the preserved input.
     if (Desc.TSFlags & X86II::EVEX_K) {
+      // First assume that the first input is the mask operand and skip past it.
       unsigned CommutableOpIdx1 = Desc.getNumDefs() + 1;
-      // If there is no preserved input we only need to skip 1 operand.
-      if (MI.getDesc().getOperandConstraint(Desc.getNumDefs(),
-                                            MCOI::TIED_TO) != -1)
-        ++CommutableOpIdx1;
-      unsigned CommutableOpIdx2 = CommutableOpIdx1 + 1;
+      unsigned CommutableOpIdx2 = Desc.getNumDefs() + 2;
+      // Check if the first input is tied. If there isn't one then we only
+      // need to skip the mask operand which we did above.
+      if ((MI.getDesc().getOperandConstraint(Desc.getNumDefs(),
+                                             MCOI::TIED_TO) != -1)) {
+        // If this is zero masking instruction with a tied operand, we need to
+        // move the first index back to the first input since this must
+        // be a 3 input instruction and we want the first two non-mask inputs.
+        // Otherwise this is a 2 input instruction with a preserved input and
+        // mask, so we need to move the indices to skip one more input.
+        if (Desc.TSFlags & X86II::EVEX_Z)
+          --CommutableOpIdx1;
+        else {
+          ++CommutableOpIdx1;
+          ++CommutableOpIdx2;
+        }
+      }
+
       if (!fixCommutedOpIndices(SrcOpIdx1, SrcOpIdx2,
                                 CommutableOpIdx1, CommutableOpIdx2))
         return false;
@@ -5133,7 +5243,7 @@ static unsigned getLoadStoreRegOpcode(unsigned Reg,
     else
       return load ?
         (HasVLX    ? X86::VMOVUPSZ128rm :
-         HasAVX512 ? X86::VMOVAPSZ128rm_NOVLX :
+         HasAVX512 ? X86::VMOVUPSZ128rm_NOVLX :
          HasAVX    ? X86::VMOVUPSrm :
                      X86::MOVUPSrm):
         (HasVLX    ? X86::VMOVUPSZ128mr :
@@ -7690,12 +7800,16 @@ static const uint16_t ReplaceableInstrs[][3] = {
   { X86::MOVNTPSmr,  X86::MOVNTPDmr, X86::MOVNTDQmr },
   { X86::ANDNPSrm,   X86::ANDNPDrm,  X86::PANDNrm   },
   { X86::ANDNPSrr,   X86::ANDNPDrr,  X86::PANDNrr   },
+  { X86::FsANDNPSrr, X86::FsANDNPDrr,X86::PANDNrr   },
   { X86::ANDPSrm,    X86::ANDPDrm,   X86::PANDrm    },
   { X86::ANDPSrr,    X86::ANDPDrr,   X86::PANDrr    },
+  { X86::FsANDPSrr,  X86::FsANDPDrr, X86::PANDrr    },
   { X86::ORPSrm,     X86::ORPDrm,    X86::PORrm     },
   { X86::ORPSrr,     X86::ORPDrr,    X86::PORrr     },
+  { X86::FsORPSrr,   X86::FsORPDrr,  X86::PORrr     },
   { X86::XORPSrm,    X86::XORPDrm,   X86::PXORrm    },
   { X86::XORPSrr,    X86::XORPDrr,   X86::PXORrr    },
+  { X86::FsXORPSrr,  X86::FsXORPDrr, X86::PXORrr    },
   // AVX 128-bit support
   { X86::VMOVAPSmr,  X86::VMOVAPDmr,  X86::VMOVDQAmr  },
   { X86::VMOVAPSrm,  X86::VMOVAPDrm,  X86::VMOVDQArm  },
@@ -7706,12 +7820,16 @@ static const uint16_t ReplaceableInstrs[][3] = {
   { X86::VMOVNTPSmr, X86::VMOVNTPDmr, X86::VMOVNTDQmr },
   { X86::VANDNPSrm,  X86::VANDNPDrm,  X86::VPANDNrm   },
   { X86::VANDNPSrr,  X86::VANDNPDrr,  X86::VPANDNrr   },
+  { X86::VFsANDNPSrr,X86::VFsANDNPDrr,X86::VPANDNrr   },
   { X86::VANDPSrm,   X86::VANDPDrm,   X86::VPANDrm    },
   { X86::VANDPSrr,   X86::VANDPDrr,   X86::VPANDrr    },
+  { X86::VFsANDPSrr, X86::VFsANDPDrr, X86::VPANDrr    },
   { X86::VORPSrm,    X86::VORPDrm,    X86::VPORrm     },
   { X86::VORPSrr,    X86::VORPDrr,    X86::VPORrr     },
+  { X86::VFsORPSrr,  X86::VFsORPDrr,  X86::VPORrr     },
   { X86::VXORPSrm,   X86::VXORPDrm,   X86::VPXORrm    },
   { X86::VXORPSrr,   X86::VXORPDrr,   X86::VPXORrr    },
+  { X86::VFsXORPSrr, X86::VFsXORPDrr, X86::VPXORrr    },
   // AVX 256-bit support
   { X86::VMOVAPSYmr,   X86::VMOVAPDYmr,   X86::VMOVDQAYmr  },
   { X86::VMOVAPSYrm,   X86::VMOVAPDYrm,   X86::VMOVDQAYrm  },

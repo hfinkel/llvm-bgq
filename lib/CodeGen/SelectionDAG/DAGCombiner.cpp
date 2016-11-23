@@ -5281,7 +5281,7 @@ SDValue DAGCombiner::visitSELECT(SDNode *N) {
     // The code in this block deals with the following 2 equivalences:
     //    select(C0|C1, x, y) <=> select(C0, x, select(C1, x, y))
     //    select(C0&C1, x, y) <=> select(C0, select(C1, x, y), y)
-    // The target can specify its prefered form with the
+    // The target can specify its preferred form with the
     // shouldNormalizeToSelectSequence() callback. However we always transform
     // to the right anyway if we find the inner select exists in the DAG anyway
     // and we always transform to the left side if we know that we can further
@@ -5542,6 +5542,7 @@ SDValue DAGCombiner::visitMSTORE(SDNode *N) {
   MaskedStoreSDNode *MST = dyn_cast<MaskedStoreSDNode>(N);
   SDValue Mask = MST->getMask();
   SDValue Data  = MST->getValue();
+  EVT VT = Data.getValueType();
   SDLoc DL(N);
 
   // If the MSTORE data type requires splitting and the mask is provided by a
@@ -5551,15 +5552,12 @@ SDValue DAGCombiner::visitMSTORE(SDNode *N) {
   if (Mask.getOpcode() == ISD::SETCC) {
 
     // Check if any splitting is required.
-    if (TLI.getTypeAction(*DAG.getContext(), Data.getValueType()) !=
+    if (TLI.getTypeAction(*DAG.getContext(), VT) !=
         TargetLowering::TypeSplitVector)
       return SDValue();
 
     SDValue MaskLo, MaskHi, Lo, Hi;
     std::tie(MaskLo, MaskHi) = SplitVSETCC(Mask.getNode(), DAG);
-
-    EVT LoVT, HiVT;
-    std::tie(LoVT, HiVT) = DAG.GetSplitDestVTs(MST->getValueType(0));
 
     SDValue Chain = MST->getChain();
     SDValue Ptr   = MST->getBasePtr();
@@ -5570,8 +5568,7 @@ SDValue DAGCombiner::visitMSTORE(SDNode *N) {
     // if Alignment is equal to the vector size,
     // take the half of it for the second part
     unsigned SecondHalfAlignment =
-      (Alignment == Data->getValueType(0).getSizeInBits()/8) ?
-         Alignment/2 : Alignment;
+      (Alignment == VT.getSizeInBits() / 8) ? Alignment / 2 : Alignment;
 
     EVT LoMemVT, HiMemVT;
     std::tie(LoMemVT, HiMemVT) = DAG.GetSplitDestVTs(MemoryVT);
@@ -5585,11 +5582,11 @@ SDValue DAGCombiner::visitMSTORE(SDNode *N) {
                            Alignment, MST->getAAInfo(), MST->getRanges());
 
     Lo = DAG.getMaskedStore(Chain, DL, DataLo, Ptr, MaskLo, LoMemVT, MMO,
-                            MST->isTruncatingStore(), MST->isCompressingStore());
+                            MST->isTruncatingStore(),
+                            MST->isCompressingStore());
 
-    unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
-    Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), Ptr,
-                      DAG.getConstant(IncrementSize, DL, Ptr.getValueType()));
+    Ptr = TLI.IncrementMemoryAddress(Ptr, MaskLo, DL, LoMemVT, DAG,
+                                     MST->isCompressingStore());
 
     MMO = DAG.getMachineFunction().
       getMachineMemOperand(MST->getPointerInfo(),
@@ -5598,7 +5595,8 @@ SDValue DAGCombiner::visitMSTORE(SDNode *N) {
                            MST->getRanges());
 
     Hi = DAG.getMaskedStore(Chain, DL, DataHi, Ptr, MaskHi, HiMemVT, MMO,
-                            MST->isTruncatingStore(), MST->isCompressingStore());
+                            MST->isTruncatingStore(),
+                            MST->isCompressingStore());
 
     AddToWorklist(Lo.getNode());
     AddToWorklist(Hi.getNode());
@@ -5737,11 +5735,10 @@ SDValue DAGCombiner::visitMLOAD(SDNode *N) {
                          Alignment, MLD->getAAInfo(), MLD->getRanges());
 
     Lo = DAG.getMaskedLoad(LoVT, DL, Chain, Ptr, MaskLo, Src0Lo, LoMemVT, MMO,
-                           ISD::NON_EXTLOAD);
+                           ISD::NON_EXTLOAD, MLD->isExpandingLoad());
 
-    unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
-    Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), Ptr,
-                      DAG.getConstant(IncrementSize, DL, Ptr.getValueType()));
+    Ptr = TLI.IncrementMemoryAddress(Ptr, MaskLo, DL, LoMemVT, DAG,
+                                     MLD->isExpandingLoad()); 
 
     MMO = DAG.getMachineFunction().
     getMachineMemOperand(MLD->getPointerInfo(),
@@ -5749,7 +5746,7 @@ SDValue DAGCombiner::visitMLOAD(SDNode *N) {
                          SecondHalfAlignment, MLD->getAAInfo(), MLD->getRanges());
 
     Hi = DAG.getMaskedLoad(HiVT, DL, Chain, Ptr, MaskHi, Src0Hi, HiMemVT, MMO,
-                           ISD::NON_EXTLOAD);
+                           ISD::NON_EXTLOAD, MLD->isExpandingLoad());
 
     AddToWorklist(Lo.getNode());
     AddToWorklist(Hi.getNode());
@@ -7304,7 +7301,7 @@ SDValue DAGCombiner::visitTRUNCATE(SDNode *N) {
   }
 
   // trunc (select c, a, b) -> select c, (trunc a), (trunc b)
-  if (N0.getOpcode() == ISD::SELECT) {
+  if (N0.getOpcode() == ISD::SELECT && N0.hasOneUse()) {
     EVT SrcVT = N0.getValueType();
     if ((!LegalOperations || TLI.isOperationLegal(ISD::SELECT, SrcVT)) &&
         TLI.isTruncateFree(SrcVT, VT)) {
@@ -10569,7 +10566,7 @@ struct LoadedSlice {
     assert(Inst && Origin && "Unable to replace a non-existing slice.");
     const SDValue &OldBaseAddr = Origin->getBasePtr();
     SDValue BaseAddr = OldBaseAddr;
-    // Get the offset in that chunk of bytes w.r.t. the endianess.
+    // Get the offset in that chunk of bytes w.r.t. the endianness.
     int64_t Offset = static_cast<int64_t>(getOffsetFromBase());
     assert(Offset >= 0 && "Offset too big to fit in int64_t!");
     if (Offset) {
