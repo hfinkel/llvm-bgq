@@ -182,6 +182,16 @@ SIRegisterInfo::requiresFrameIndexScavenging(const MachineFunction &MF) const {
   return MF.getFrameInfo().hasStackObjects();
 }
 
+bool SIRegisterInfo::requiresFrameIndexReplacementScavenging(
+  const MachineFunction &MF) const {
+  // m0 is needed for the scalar store offset. m0 is unallocatable, so we can't
+  // create a virtual register for it during frame index elimination, so the
+  // scavenger is directly needed.
+  return MF.getFrameInfo().hasStackObjects() &&
+         MF.getSubtarget<SISubtarget>().hasScalarStores() &&
+         MF.getInfo<SIMachineFunctionInfo>()->hasSpilledSGPRs();
+}
+
 bool SIRegisterInfo::requiresVirtualBaseRegisters(
   const MachineFunction &) const {
   // There are no special dedicated stack or frame pointers.
@@ -233,7 +243,7 @@ void SIRegisterInfo::materializeFrameBaseRegister(MachineBasicBlock *MBB,
 
   MachineRegisterInfo &MRI = MF->getRegInfo();
   unsigned UnusedCarry = MRI.createVirtualRegister(&AMDGPU::SReg_64RegClass);
-  unsigned OffsetReg = MRI.createVirtualRegister(&AMDGPU::SReg_32RegClass);
+  unsigned OffsetReg = MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
 
   BuildMI(*MBB, Ins, DL, TII->get(AMDGPU::S_MOV_B32), OffsetReg)
     .addImm(Offset);
@@ -517,7 +527,19 @@ void SIRegisterInfo::spillSGPR(MachineBasicBlock::iterator MI,
 
   bool SpillToSMEM = ST.hasScalarStores() && EnableSpillSGPRToSMEM;
 
+  assert(SuperReg != AMDGPU::M0 && "m0 should never spill");
+
   const unsigned EltSize = 4;
+  unsigned OffsetReg = AMDGPU::M0;
+  unsigned M0CopyReg = AMDGPU::NoRegister;
+
+  if (SpillToSMEM) {
+    if (RS->isRegUsed(AMDGPU::M0)) {
+      M0CopyReg = MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
+      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::COPY), M0CopyReg)
+        .addReg(AMDGPU::M0);
+    }
+  }
 
   // SubReg carries the "Kill" flag when SubReg == SuperReg.
   unsigned SubKillState = getKillRegState((NumSubRegs == 1) && IsKill);
@@ -526,19 +548,6 @@ void SIRegisterInfo::spillSGPR(MachineBasicBlock::iterator MI,
       SuperReg : getSubReg(SuperReg, getSubRegFromChannel(i));
 
     if (SpillToSMEM) {
-      if (SuperReg == AMDGPU::M0) {
-        assert(NumSubRegs == 1);
-        unsigned CopyM0
-          = MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
-
-        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::COPY), CopyM0)
-          .addReg(AMDGPU::M0, getKillRegState(IsKill));
-
-        // The real spill now kills the temp copy.
-        SubReg = SuperReg = CopyM0;
-        IsKill = true;
-      }
-
       int64_t FrOffset = FrameInfo.getObjectOffset(Index);
       unsigned Align = FrameInfo.getObjectAlignment(Index);
       MachinePointerInfo PtrInfo
@@ -547,7 +556,6 @@ void SIRegisterInfo::spillSGPR(MachineBasicBlock::iterator MI,
         = MF->getMachineMemOperand(PtrInfo, MachineMemOperand::MOStore,
                                    EltSize, MinAlign(Align, EltSize * i));
 
-      unsigned OffsetReg = AMDGPU::M0;
       // Add i * 4 wave offset.
       //
       // SMEM instructions only support a single offset, so increment the wave
@@ -566,7 +574,7 @@ void SIRegisterInfo::spillSGPR(MachineBasicBlock::iterator MI,
       BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_BUFFER_STORE_DWORD_SGPR))
         .addReg(SubReg, getKillRegState(IsKill)) // sdata
         .addReg(MFI->getScratchRSrcReg())        // sbase
-        .addReg(OffsetReg)                       // soff
+        .addReg(OffsetReg, RegState::Kill)       // soff
         .addImm(0)                               // glc
         .addMemOperand(MMO);
 
@@ -576,18 +584,6 @@ void SIRegisterInfo::spillSGPR(MachineBasicBlock::iterator MI,
     struct SIMachineFunctionInfo::SpilledReg Spill =
       MFI->getSpilledReg(MF, Index, i);
     if (Spill.hasReg()) {
-      if (SuperReg == AMDGPU::M0) {
-        assert(NumSubRegs == 1);
-        unsigned CopyM0
-          = MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
-        BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_MOV_B32), CopyM0)
-          .addReg(SuperReg, getKillRegState(IsKill));
-
-        // The real spill now kills the temp copy.
-        SubReg = SuperReg = CopyM0;
-        IsKill = true;
-      }
-
       BuildMI(*MBB, MI, DL,
               TII->getMCOpcodeFromPseudo(AMDGPU::V_WRITELANE_B32),
               Spill.VGPR)
@@ -634,6 +630,11 @@ void SIRegisterInfo::spillSGPR(MachineBasicBlock::iterator MI,
     }
   }
 
+  if (M0CopyReg != AMDGPU::NoRegister) {
+    BuildMI(*MBB, MI, DL, TII->get(AMDGPU::COPY), AMDGPU::M0)
+      .addReg(M0CopyReg, RegState::Kill);
+  }
+
   MI->eraseFromParent();
   MFI->addToSpilledSGPRs(NumSubRegs);
 }
@@ -654,14 +655,20 @@ void SIRegisterInfo::restoreSGPR(MachineBasicBlock::iterator MI,
   unsigned SuperReg = MI->getOperand(0).getReg();
   bool SpillToSMEM = ST.hasScalarStores() && EnableSpillSGPRToSMEM;
 
-  // m0 is not allowed as with readlane/writelane, so a temporary SGPR and
-  // extra copy is needed.
-  bool IsM0 = (SuperReg == AMDGPU::M0);
-  if (IsM0) {
-    assert(NumSubRegs == 1);
-    SuperReg = MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
+  assert(SuperReg != AMDGPU::M0 && "m0 should never spill");
+
+  unsigned OffsetReg = AMDGPU::M0;
+  unsigned M0CopyReg = AMDGPU::NoRegister;
+
+  if (SpillToSMEM) {
+    if (RS->isRegUsed(AMDGPU::M0)) {
+      M0CopyReg = MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
+      BuildMI(*MBB, MI, DL, TII->get(AMDGPU::COPY), M0CopyReg)
+        .addReg(AMDGPU::M0);
+    }
   }
 
+  // SubReg carries the "Kill" flag when SubReg == SuperReg.
   int64_t FrOffset = FrameInfo.getObjectOffset(Index);
 
   const unsigned EltSize = 4;
@@ -678,8 +685,6 @@ void SIRegisterInfo::restoreSGPR(MachineBasicBlock::iterator MI,
         = MF->getMachineMemOperand(PtrInfo, MachineMemOperand::MOLoad,
                                    EltSize, MinAlign(Align, EltSize * i));
 
-      unsigned OffsetReg = AMDGPU::M0;
-
       // Add i * 4 offset
       int64_t Offset = ST.getWavefrontSize() * (FrOffset + 4 * i);
       if (Offset != 0) {
@@ -694,7 +699,7 @@ void SIRegisterInfo::restoreSGPR(MachineBasicBlock::iterator MI,
       auto MIB =
         BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_BUFFER_LOAD_DWORD_SGPR), SubReg)
         .addReg(MFI->getScratchRSrcReg()) // sbase
-        .addReg(OffsetReg)                // soff
+        .addReg(OffsetReg, RegState::Kill)                // soff
         .addImm(0)                        // glc
         .addMemOperand(MMO);
 
@@ -745,9 +750,9 @@ void SIRegisterInfo::restoreSGPR(MachineBasicBlock::iterator MI,
     }
   }
 
-  if (IsM0 && SuperReg != AMDGPU::M0) {
-    BuildMI(*MBB, MI, DL, TII->get(AMDGPU::S_MOV_B32), AMDGPU::M0)
-      .addReg(SuperReg);
+  if (M0CopyReg != AMDGPU::NoRegister) {
+    BuildMI(*MBB, MI, DL, TII->get(AMDGPU::COPY), AMDGPU::M0)
+      .addReg(M0CopyReg, RegState::Kill);
   }
 
   MI->eraseFromParent();
