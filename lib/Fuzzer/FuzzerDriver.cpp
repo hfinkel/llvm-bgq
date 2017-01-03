@@ -15,6 +15,7 @@
 #include "FuzzerIO.h"
 #include "FuzzerMutate.h"
 #include "FuzzerRandom.h"
+#include "FuzzerTracePC.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -389,6 +390,9 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
   FuzzingOptions Options;
   Options.Verbosity = Flags.verbosity;
   Options.MaxLen = Flags.max_len;
+  Options.ExperimentalLenControl = Flags.experimental_len_control;
+  if (Flags.experimental_len_control && Flags.max_len == 64)
+    Options.MaxLen = 1 << 20;
   Options.UnitTimeoutSec = Flags.timeout;
   Options.ErrorExitCode = Flags.error_exitcode;
   Options.TimeoutExitCode = Flags.timeout_exitcode;
@@ -432,6 +436,7 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
   Options.PrintFinalStats = Flags.print_final_stats;
   Options.PrintCorpusStats = Flags.print_corpus_stats;
   Options.PrintCoverage = Flags.print_coverage;
+  Options.DumpCoverage = Flags.dump_coverage;
   if (Flags.exit_on_src_pos)
     Options.ExitOnSrcPos = Flags.exit_on_src_pos;
   if (Flags.exit_on_item)
@@ -440,8 +445,8 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
   unsigned Seed = Flags.seed;
   // Initialize Seed.
   if (Seed == 0)
-    Seed = (std::chrono::system_clock::now().time_since_epoch().count() << 10) +
-           GetPid();
+    Seed =
+        std::chrono::system_clock::now().time_since_epoch().count() + GetPid();
   if (Flags.verbosity)
     Printf("INFO: Seed: %u\n", Seed);
 
@@ -493,17 +498,14 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
   if (Flags.merge) {
     if (Options.MaxLen == 0)
       F->SetMaxInputLen(kMaxSaneLen);
-    F->Merge(*Inputs);
-    exit(0);
-  }
-
-  if (Flags.experimental_merge) {
-    if (Options.MaxLen == 0)
-      F->SetMaxInputLen(kMaxSaneLen);
-    if (Flags.merge_control_file)
-      F->CrashResistantMergeInternalStep(Flags.merge_control_file);
-    else
-      F->CrashResistantMerge(Args, *Inputs);
+    if (TPC.UsingTracePcGuard()) {
+      if (Flags.merge_control_file)
+        F->CrashResistantMergeInternalStep(Flags.merge_control_file);
+      else
+        F->CrashResistantMerge(Args, *Inputs);
+    } else {
+      F->Merge(*Inputs);
+    }
     exit(0);
   }
 

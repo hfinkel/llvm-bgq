@@ -17,6 +17,7 @@ FUZZER_FLAG_INT(runs, -1,
 FUZZER_FLAG_INT(max_len, 0, "Maximum length of the test input. "
     "If 0, libFuzzer tries to guess a good value based on the corpus "
     "and reports it. ")
+FUZZER_FLAG_INT(experimental_len_control, 0, "experimental flag")
 FUZZER_FLAG_INT(cross_over, 1, "If 1, cross over inputs.")
 FUZZER_FLAG_INT(mutate_depth, 5,
             "Apply this number of consecutive mutations to each input.")
@@ -37,8 +38,6 @@ FUZZER_FLAG_INT(help, 0, "Print help.")
 FUZZER_FLAG_INT(merge, 0, "If 1, the 2-nd, 3-rd, etc corpora will be "
   "merged into the 1-st corpus. Only interesting units will be taken. "
   "This flag can be used to minimize a corpus.")
-FUZZER_FLAG_INT(experimental_merge, 0, "Experimental crash-resistant, "
-                "may eventually replace -merge.")
 FUZZER_FLAG_STRING(merge_control_file, "internal flag")
 FUZZER_FLAG_INT(minimize_crash, 0, "If 1, minimizes the provided"
   " crash input. Use with -runs=N or -max_total_time=N to limit "
@@ -83,6 +82,8 @@ FUZZER_FLAG_INT(print_corpus_stats, 0,
   "If 1, print statistics on corpus elements at exit.")
 FUZZER_FLAG_INT(print_coverage, 0, "If 1, print coverage information at exit."
                                    " Experimental, only with trace-pc-guard")
+FUZZER_FLAG_INT(dump_coverage, 0, "If 1, dump coverage information at exit."
+                                  " Experimental, only with trace-pc-guard")
 FUZZER_FLAG_INT(handle_segv, 1, "If 1, try to intercept SIGSEGV.")
 FUZZER_FLAG_INT(handle_bus, 1, "If 1, try to intercept SIGSEGV.")
 FUZZER_FLAG_INT(handle_abrt, 1, "If 1, try to intercept SIGABRT.")

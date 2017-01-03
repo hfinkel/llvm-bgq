@@ -28,8 +28,33 @@
 
 using namespace llvm;
 using namespace llvm::object;
+using namespace llvm::support::endian;
 
 #define DEBUG_TYPE "dyld"
+
+static void or32le(void *P, int32_t V) { write32le(P, read32le(P) | V); }
+
+static void or32AArch64Imm(void *L, uint64_t Imm) {
+  or32le(L, (Imm & 0xFFF) << 10);
+}
+
+template <class T> static void write(bool isBE, void *P, T V) {
+  isBE ? write<T, support::big>(P, V) : write<T, support::little>(P, V);
+}
+
+static void write32AArch64Addr(void *L, uint64_t Imm) {
+  uint32_t ImmLo = (Imm & 0x3) << 29;
+  uint32_t ImmHi = (Imm & 0x1FFFFC) << 3;
+  uint64_t Mask = (0x3 << 29) | (0x1FFFFC << 3);
+  write32le(L, (read32le(L) & ~Mask) | ImmLo | ImmHi);
+}
+
+// Return the bits [Start, End] from Val shifted Start bits.
+// For instance, getBits(0xF0, 4, 8) returns 0xF.
+static uint64_t getBits(uint64_t Val, int Start, int End) {
+  uint64_t Mask = ((uint64_t)1 << (End + 1 - Start)) - 1;
+  return (Val >> Start) & Mask;
+}
 
 namespace {
 
@@ -325,6 +350,8 @@ void RuntimeDyldELF::resolveAArch64Relocation(const SectionEntry &Section,
   uint32_t *TargetPtr =
       reinterpret_cast<uint32_t *>(Section.getAddressWithOffset(Offset));
   uint64_t FinalAddress = Section.getLoadAddressWithOffset(Offset);
+  // Data should use target endian. Code should always use little endian.
+  bool isBE = Arch == Triple::aarch64_be;
 
   DEBUG(dbgs() << "resolveAArch64Relocation, LocalAddress: 0x"
                << format("%llx", Section.getAddressWithOffset(Offset))
@@ -337,17 +364,14 @@ void RuntimeDyldELF::resolveAArch64Relocation(const SectionEntry &Section,
   default:
     llvm_unreachable("Relocation type not implemented yet!");
     break;
-  case ELF::R_AARCH64_ABS64: {
-    uint64_t *TargetPtr =
-        reinterpret_cast<uint64_t *>(Section.getAddressWithOffset(Offset));
-    *TargetPtr = Value + Addend;
+  case ELF::R_AARCH64_ABS64:
+    write(isBE, TargetPtr, Value + Addend);
     break;
-  }
   case ELF::R_AARCH64_PREL32: {
     uint64_t Result = Value + Addend - FinalAddress;
     assert(static_cast<int64_t>(Result) >= INT32_MIN &&
            static_cast<int64_t>(Result) <= UINT32_MAX);
-    *TargetPtr = static_cast<uint32_t>(Result & 0xffffffffU);
+    write(isBE, TargetPtr, static_cast<uint32_t>(Result & 0xffffffffU));
     break;
   }
   case ELF::R_AARCH64_CALL26: // fallthrough
@@ -358,62 +382,21 @@ void RuntimeDyldELF::resolveAArch64Relocation(const SectionEntry &Section,
 
     // "Check that -2^27 <= result < 2^27".
     assert(isInt<28>(BranchImm));
-
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0xfc000000U;
-    // Immediate goes in bits 25:0 of B and BL.
-    *TargetPtr |= static_cast<uint32_t>(BranchImm & 0xffffffcU) >> 2;
+    or32le(TargetPtr, (BranchImm & 0x0FFFFFFC) >> 2);
     break;
   }
-  case ELF::R_AARCH64_MOVW_UABS_G3: {
-    uint64_t Result = Value + Addend;
-
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0xffe0001fU;
-    // Immediate goes in bits 20:5 of MOVZ/MOVK instruction
-    *TargetPtr |= Result >> (48 - 5);
-    // Shift must be "lsl #48", in bits 22:21
-    assert((*TargetPtr >> 21 & 0x3) == 3 && "invalid shift for relocation");
+  case ELF::R_AARCH64_MOVW_UABS_G3:
+    or32le(TargetPtr, ((Value + Addend) & 0xFFFF000000000000) >> 43);
     break;
-  }
-  case ELF::R_AARCH64_MOVW_UABS_G2_NC: {
-    uint64_t Result = Value + Addend;
-
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0xffe0001fU;
-    // Immediate goes in bits 20:5 of MOVZ/MOVK instruction
-    *TargetPtr |= ((Result & 0xffff00000000ULL) >> (32 - 5));
-    // Shift must be "lsl #32", in bits 22:21
-    assert((*TargetPtr >> 21 & 0x3) == 2 && "invalid shift for relocation");
+  case ELF::R_AARCH64_MOVW_UABS_G2_NC:
+    or32le(TargetPtr, ((Value + Addend) & 0xFFFF00000000) >> 27);
     break;
-  }
-  case ELF::R_AARCH64_MOVW_UABS_G1_NC: {
-    uint64_t Result = Value + Addend;
-
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0xffe0001fU;
-    // Immediate goes in bits 20:5 of MOVZ/MOVK instruction
-    *TargetPtr |= ((Result & 0xffff0000U) >> (16 - 5));
-    // Shift must be "lsl #16", in bits 22:2
-    assert((*TargetPtr >> 21 & 0x3) == 1 && "invalid shift for relocation");
+  case ELF::R_AARCH64_MOVW_UABS_G1_NC:
+    or32le(TargetPtr, ((Value + Addend) & 0xFFFF0000) >> 11);
     break;
-  }
-  case ELF::R_AARCH64_MOVW_UABS_G0_NC: {
-    uint64_t Result = Value + Addend;
-
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0xffe0001fU;
-    // Immediate goes in bits 20:5 of MOVZ/MOVK instruction
-    *TargetPtr |= ((Result & 0xffffU) << 5);
-    // Shift must be "lsl #0", in bits 22:21.
-    assert((*TargetPtr >> 21 & 0x3) == 0 && "invalid shift for relocation");
+  case ELF::R_AARCH64_MOVW_UABS_G0_NC:
+    or32le(TargetPtr, ((Value + Addend) & 0xFFFF) << 5);
     break;
-  }
   case ELF::R_AARCH64_ADR_PREL_PG_HI21: {
     // Operation: Page(S+A) - Page(P)
     uint64_t Result =
@@ -422,39 +405,29 @@ void RuntimeDyldELF::resolveAArch64Relocation(const SectionEntry &Section,
     // Check that -2^32 <= X < 2^32
     assert(isInt<33>(Result) && "overflow check failed for relocation");
 
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0x9f00001fU;
     // Immediate goes in bits 30:29 + 5:23 of ADRP instruction, taken
     // from bits 32:12 of X.
-    *TargetPtr |= ((Result & 0x3000U) << (29 - 12));
-    *TargetPtr |= ((Result & 0x1ffffc000ULL) >> (14 - 5));
+    write32AArch64Addr(TargetPtr, Result >> 12);
     break;
   }
-  case ELF::R_AARCH64_LDST32_ABS_LO12_NC: {
+  case ELF::R_AARCH64_ADD_ABS_LO12_NC:
     // Operation: S + A
-    uint64_t Result = Value + Addend;
-
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0xffc003ffU;
+    // Immediate goes in bits 21:10 of LD/ST instruction, taken
+    // from bits 11:0 of X
+    or32AArch64Imm(TargetPtr, Value + Addend);
+    break;
+  case ELF::R_AARCH64_LDST32_ABS_LO12_NC:
+    // Operation: S + A
     // Immediate goes in bits 21:10 of LD/ST instruction, taken
     // from bits 11:2 of X
-    *TargetPtr |= ((Result & 0xffc) << (10 - 2));
+    or32AArch64Imm(TargetPtr, getBits(Value + Addend, 2, 11));
     break;
-  }
-  case ELF::R_AARCH64_LDST64_ABS_LO12_NC: {
+  case ELF::R_AARCH64_LDST64_ABS_LO12_NC:
     // Operation: S + A
-    uint64_t Result = Value + Addend;
-
-    // AArch64 code is emitted with .rela relocations. The data already in any
-    // bits affected by the relocation on entry is garbage.
-    *TargetPtr &= 0xffc003ffU;
     // Immediate goes in bits 21:10 of LD/ST instruction, taken
     // from bits 11:3 of X
-    *TargetPtr |= ((Result & 0xff8) << (10 - 3));
+    or32AArch64Imm(TargetPtr, getBits(Value + Addend, 3, 11));
     break;
-  }
   }
 }
 

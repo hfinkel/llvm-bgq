@@ -551,11 +551,11 @@ int X86TTIImpl::getArithmeticInstrCost(
     { ISD::SUB,     MVT::v4i64,    4 },
     { ISD::ADD,     MVT::v4i64,    4 },
     // A v4i64 multiply is custom lowered as two split v2i64 vectors that then
-    // are lowered as a series of long multiplies(3), shifts(4) and adds(2)
+    // are lowered as a series of long multiplies(3), shifts(3) and adds(2)
     // Because we believe v4i64 to be a legal type, we must also include the
-    // split factor of two in the cost table. Therefore, the cost here is 18
-    // instead of 9.
-    { ISD::MUL,     MVT::v4i64,    18 },
+    // split factor of two in the cost table. Therefore, the cost here is 16
+    // instead of 8.
+    { ISD::MUL,     MVT::v4i64,    16 },
   };
 
   // Look for AVX1 lowering tricks.
@@ -569,10 +569,10 @@ int X86TTIImpl::getArithmeticInstrCost(
   // Custom lowering of vectors.
   static const CostTblEntry CustomLowered[] = {
     // A v2i64/v4i64 and multiply is custom lowered as a series of long
-    // multiplies(3), shifts(4) and adds(2).
-    { ISD::MUL,     MVT::v2i64,    9 },
-    { ISD::MUL,     MVT::v4i64,    9 },
-    { ISD::MUL,     MVT::v8i64,    9 }
+    // multiplies(3), shifts(3) and adds(2).
+    { ISD::MUL,     MVT::v2i64,    8 },
+    { ISD::MUL,     MVT::v4i64,    8 },
+    { ISD::MUL,     MVT::v8i64,    8 }
   };
   if (const auto *Entry = CostTableLookup(CustomLowered, ISD, LT.second))
     return LT.first * Entry->Cost;
@@ -598,21 +598,108 @@ int X86TTIImpl::getArithmeticInstrCost(
 
 int X86TTIImpl::getShuffleCost(TTI::ShuffleKind Kind, Type *Tp, int Index,
                                Type *SubTp) {
-  // We only estimate the cost of reverse and alternate shuffles.
-  if (Kind != TTI::SK_Reverse && Kind != TTI::SK_Alternate)
-    return BaseT::getShuffleCost(Kind, Tp, Index, SubTp);
 
   if (Kind == TTI::SK_Reverse) {
     std::pair<int, MVT> LT = TLI->getTypeLegalizationCost(DL, Tp);
-    int Cost = 1;
-    if (LT.second.getSizeInBits() > 128)
-      Cost = 3; // Extract + insert + copy.
 
-    // Multiple by the number of parts.
-    return Cost * LT.first;
-  }
+    static const CostTblEntry AVX512VBMIShuffleTbl[] = {
+      { ISD::VECTOR_SHUFFLE, MVT::v64i8,  1 }, // vpermb
+      { ISD::VECTOR_SHUFFLE, MVT::v32i8,  1 }  // vpermb
+    };
 
-  if (Kind == TTI::SK_Alternate) {
+    if (ST->hasVBMI())
+      if (const auto *Entry = CostTableLookup(AVX512VBMIShuffleTbl,
+                                              ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+    static const CostTblEntry AVX512BWShuffleTbl[] = {
+      { ISD::VECTOR_SHUFFLE, MVT::v32i16, 1 }, // vpermw
+      { ISD::VECTOR_SHUFFLE, MVT::v16i16, 1 }, // vpermw
+      { ISD::VECTOR_SHUFFLE, MVT::v64i8,  6 }  // vextracti64x4 + 2*vperm2i128
+                                               // + 2*pshufb + vinserti64x4
+    };
+
+    if (ST->hasBWI())
+      if (const auto *Entry = CostTableLookup(AVX512BWShuffleTbl,
+                                              ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+    static const CostTblEntry AVX512ShuffleTbl[] = {
+      { ISD::VECTOR_SHUFFLE, MVT::v8f64,  1 }, // vpermpd
+      { ISD::VECTOR_SHUFFLE, MVT::v16f32, 1 }, // vpermps
+      { ISD::VECTOR_SHUFFLE, MVT::v8i64,  1 }, // vpermq
+      { ISD::VECTOR_SHUFFLE, MVT::v16i32, 1 }, // vpermd
+    };
+
+    if (ST->hasAVX512())
+      if (const auto *Entry =
+              CostTableLookup(AVX512ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+    static const CostTblEntry AVX2ShuffleTbl[] = {
+      { ISD::VECTOR_SHUFFLE, MVT::v4f64,  1 }, // vpermpd
+      { ISD::VECTOR_SHUFFLE, MVT::v8f32,  1 }, // vpermps
+      { ISD::VECTOR_SHUFFLE, MVT::v4i64,  1 }, // vpermq
+      { ISD::VECTOR_SHUFFLE, MVT::v8i32,  1 }, // vpermd
+      { ISD::VECTOR_SHUFFLE, MVT::v16i16, 2 }, // vperm2i128 + pshufb
+      { ISD::VECTOR_SHUFFLE, MVT::v32i8,  2 }  // vperm2i128 + pshufb
+    };
+
+    if (ST->hasAVX2())
+      if (const auto *Entry =
+              CostTableLookup(AVX2ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+    static const CostTblEntry AVX1ShuffleTbl[] = {
+      { ISD::VECTOR_SHUFFLE, MVT::v4f64,  2 }, // vperm2f128 + vpermilpd
+      { ISD::VECTOR_SHUFFLE, MVT::v8f32,  2 }, // vperm2f128 + vpermilps
+      { ISD::VECTOR_SHUFFLE, MVT::v4i64,  2 }, // vperm2f128 + vpermilpd
+      { ISD::VECTOR_SHUFFLE, MVT::v8i32,  2 }, // vperm2f128 + vpermilps
+      { ISD::VECTOR_SHUFFLE, MVT::v16i16, 4 }, // vextractf128 + 2*pshufb
+                                               // + vinsertf128
+      { ISD::VECTOR_SHUFFLE, MVT::v32i8,  4 }  // vextractf128 + 2*pshufb
+                                               // + vinsertf128
+    };
+
+    if (ST->hasAVX())
+      if (const auto *Entry =
+              CostTableLookup(AVX1ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+    static const CostTblEntry SSSE3ShuffleTbl[] = {
+      { ISD::VECTOR_SHUFFLE, MVT::v8i16, 1 }, // pshufb
+      { ISD::VECTOR_SHUFFLE, MVT::v16i8, 1 }  // pshufb
+    };
+
+    if (ST->hasSSSE3())
+      if (const auto *Entry =
+              CostTableLookup(SSSE3ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+    static const CostTblEntry SSE2ShuffleTbl[] = {
+      { ISD::VECTOR_SHUFFLE, MVT::v2f64, 1 }, // shufpd
+      { ISD::VECTOR_SHUFFLE, MVT::v2i64, 1 }, // pshufd
+      { ISD::VECTOR_SHUFFLE, MVT::v4i32, 1 }, // pshufd
+      { ISD::VECTOR_SHUFFLE, MVT::v8i16, 3 }, // pshuflw + pshufhw  + pshufd
+      { ISD::VECTOR_SHUFFLE, MVT::v16i8, 9 }  // 2*pshuflw + 2*pshufhw
+                                              // + 2*pshufd + 2*unpck + packus
+    };
+
+    if (ST->hasSSE2())
+      if (const auto *Entry =
+              CostTableLookup(SSE2ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+    static const CostTblEntry SSE1ShuffleTbl[] = {
+        { ISD::VECTOR_SHUFFLE, MVT::v4f32, 1 }, // shufps
+    };
+
+    if (ST->hasSSE1())
+      if (const auto *Entry =
+              CostTableLookup(SSE1ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+        return LT.first * Entry->Cost;
+
+  } else if (Kind == TTI::SK_Alternate) {
     // 64-bit packed float vectors (v2f32) are widened to type v4f32.
     // 64-bit packed integer vectors (v2i32) are promoted to type v2i64.
     std::pair<int, MVT> LT = TLI->getTypeLegalizationCost(DL, Tp);
@@ -702,7 +789,132 @@ int X86TTIImpl::getShuffleCost(TTI::ShuffleKind Kind, Type *Tp, int Index,
     if (const auto *Entry = CostTableLookup(SSEAltShuffleTbl,
                                             ISD::VECTOR_SHUFFLE, LT.second))
       return LT.first * Entry->Cost;
-    return BaseT::getShuffleCost(Kind, Tp, Index, SubTp);
+
+  } else if (Kind == TTI::SK_PermuteTwoSrc) {
+    // We assume that source and destination have the same vector type.
+    std::pair<int, MVT> LT = TLI->getTypeLegalizationCost(DL, Tp);
+    int NumOfDests = LT.first;
+    int NumOfShufflesPerDest = LT.first * 2 - 1;
+    int NumOfShuffles = NumOfDests * NumOfShufflesPerDest;
+
+    static const CostTblEntry AVX512VBMIShuffleTbl[] = {
+        {ISD::VECTOR_SHUFFLE, MVT::v64i8, 1}, // vpermt2b
+        {ISD::VECTOR_SHUFFLE, MVT::v32i8, 1}, // vpermt2b
+        {ISD::VECTOR_SHUFFLE, MVT::v16i8, 1}  // vpermt2b
+    };
+
+    if (ST->hasVBMI())
+      if (const auto *Entry = CostTableLookup(AVX512VBMIShuffleTbl,
+                                              ISD::VECTOR_SHUFFLE, LT.second))
+        return NumOfShuffles * Entry->Cost;
+
+    static const CostTblEntry AVX512BWShuffleTbl[] = {
+        {ISD::VECTOR_SHUFFLE, MVT::v32i16, 1}, // vpermt2w
+        {ISD::VECTOR_SHUFFLE, MVT::v16i16, 1}, // vpermt2w
+        {ISD::VECTOR_SHUFFLE, MVT::v8i16, 1},  // vpermt2w
+        {ISD::VECTOR_SHUFFLE, MVT::v32i8, 3},  // zext + vpermt2w + trunc
+        {ISD::VECTOR_SHUFFLE, MVT::v64i8, 19}, // 6 * v32i8 + 1
+        {ISD::VECTOR_SHUFFLE, MVT::v16i8, 3}   // zext + vpermt2w + trunc
+    };
+
+    if (ST->hasBWI())
+      if (const auto *Entry = CostTableLookup(AVX512BWShuffleTbl,
+                                              ISD::VECTOR_SHUFFLE, LT.second))
+        return NumOfShuffles * Entry->Cost;
+
+    static const CostTblEntry AVX512ShuffleTbl[] = {
+        {ISD::VECTOR_SHUFFLE, MVT::v8f64, 1},  // vpermt2pd
+        {ISD::VECTOR_SHUFFLE, MVT::v16f32, 1}, // vpermt2ps
+        {ISD::VECTOR_SHUFFLE, MVT::v8i64, 1},  // vpermt2q
+        {ISD::VECTOR_SHUFFLE, MVT::v16i32, 1}, // vpermt2d
+        {ISD::VECTOR_SHUFFLE, MVT::v4f64, 1},  // vpermt2pd
+        {ISD::VECTOR_SHUFFLE, MVT::v8f32, 1},  // vpermt2ps
+        {ISD::VECTOR_SHUFFLE, MVT::v4i64, 1},  // vpermt2q
+        {ISD::VECTOR_SHUFFLE, MVT::v8i32, 1},  // vpermt2d
+        {ISD::VECTOR_SHUFFLE, MVT::v2f64, 1},  // vpermt2pd
+        {ISD::VECTOR_SHUFFLE, MVT::v4f32, 1},  // vpermt2ps
+        {ISD::VECTOR_SHUFFLE, MVT::v2i64, 1},  // vpermt2q
+        {ISD::VECTOR_SHUFFLE, MVT::v4i32, 1}   // vpermt2d
+    };
+
+    if (ST->hasAVX512())
+      if (const auto *Entry =
+              CostTableLookup(AVX512ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+        return NumOfShuffles * Entry->Cost;
+
+  } else if (Kind == TTI::SK_PermuteSingleSrc) {
+    std::pair<int, MVT> LT = TLI->getTypeLegalizationCost(DL, Tp);
+    if (LT.first == 1) {
+
+      static const CostTblEntry AVX512VBMIShuffleTbl[] = {
+          {ISD::VECTOR_SHUFFLE, MVT::v64i8, 1}, // vpermb
+          {ISD::VECTOR_SHUFFLE, MVT::v32i8, 1}  // vpermb
+      };
+
+      if (ST->hasVBMI())
+        if (const auto *Entry = CostTableLookup(AVX512VBMIShuffleTbl,
+                                                ISD::VECTOR_SHUFFLE, LT.second))
+          return Entry->Cost;
+
+      static const CostTblEntry AVX512BWShuffleTbl[] = {
+          {ISD::VECTOR_SHUFFLE, MVT::v32i16, 1}, // vpermw
+          {ISD::VECTOR_SHUFFLE, MVT::v16i16, 1}, // vpermw
+          {ISD::VECTOR_SHUFFLE, MVT::v8i16, 1},  // vpermw
+          {ISD::VECTOR_SHUFFLE, MVT::v64i8, 8},  // extend to v32i16
+          {ISD::VECTOR_SHUFFLE, MVT::v32i8, 3}   // vpermw + zext/trunc
+      };
+
+      if (ST->hasBWI())
+        if (const auto *Entry = CostTableLookup(AVX512BWShuffleTbl,
+                                                ISD::VECTOR_SHUFFLE, LT.second))
+          return Entry->Cost;
+
+      static const CostTblEntry AVX512ShuffleTbl[] = {
+          {ISD::VECTOR_SHUFFLE, MVT::v8f64, 1},  // vpermpd
+          {ISD::VECTOR_SHUFFLE, MVT::v4f64, 1},  // vpermpd
+          {ISD::VECTOR_SHUFFLE, MVT::v2f64, 1},  // vpermpd
+          {ISD::VECTOR_SHUFFLE, MVT::v16f32, 1}, // vpermps
+          {ISD::VECTOR_SHUFFLE, MVT::v8f32, 1},  // vpermps
+          {ISD::VECTOR_SHUFFLE, MVT::v4f32, 1},  // vpermps
+          {ISD::VECTOR_SHUFFLE, MVT::v8i64, 1},  // vpermq
+          {ISD::VECTOR_SHUFFLE, MVT::v4i64, 1},  // vpermq
+          {ISD::VECTOR_SHUFFLE, MVT::v2i64, 1},  // vpermq
+          {ISD::VECTOR_SHUFFLE, MVT::v16i32, 1}, // vpermd
+          {ISD::VECTOR_SHUFFLE, MVT::v8i32, 1},  // vpermd
+          {ISD::VECTOR_SHUFFLE, MVT::v4i32, 1},  // vpermd
+          {ISD::VECTOR_SHUFFLE, MVT::v16i8, 1}   // pshufb
+      };
+
+      if (ST->hasAVX512())
+        if (const auto *Entry =
+            CostTableLookup(AVX512ShuffleTbl, ISD::VECTOR_SHUFFLE, LT.second))
+          return Entry->Cost;
+
+    } else {
+      // We are going to permute multiple sources and the result will be in
+      // multiple destinations. Providing an accurate cost only for splits where
+      // the element type remains the same.
+
+      MVT LegalVT = LT.second;
+      if (LegalVT.getVectorElementType().getSizeInBits() ==
+              Tp->getVectorElementType()->getPrimitiveSizeInBits() &&
+          LegalVT.getVectorNumElements() < Tp->getVectorNumElements()) {
+
+        unsigned VecTySize = DL.getTypeStoreSize(Tp);
+        unsigned LegalVTSize = LegalVT.getStoreSize();
+        // Number of source vectors after legalization:
+        unsigned NumOfSrcs = (VecTySize + LegalVTSize - 1) / LegalVTSize;
+        // Number of destination vectors after legalization:
+        unsigned NumOfDests = LT.first;
+
+        Type *SingleOpTy = VectorType::get(Tp->getVectorElementType(),
+                                           LegalVT.getVectorNumElements());
+
+        unsigned NumOfShuffles = (NumOfSrcs - 1) * NumOfDests;
+        return NumOfShuffles *
+               getShuffleCost(TTI::SK_PermuteTwoSrc, SingleOpTy, 0, nullptr);
+      }
+    }
   }
 
   return BaseT::getShuffleCost(Kind, Tp, Index, SubTp);
@@ -1852,13 +2064,14 @@ int X86TTIImpl::getGatherScatterOpCost(unsigned Opcode, Type *SrcVTy,
   // Vector-4 of gather/scatter instruction does not exist on KNL.
   // We can extend it to 8 elements, but zeroing upper bits of
   // the mask vector will add more instructions. Right now we give the scalar
-  // cost of vector-4 for KNL. TODO: Check, maybe the gather/scatter instruction is
-  // better in the VariableMask case.
+  // cost of vector-4 for KNL. TODO: Check, maybe the gather/scatter instruction
+  // is better in the VariableMask case.
   if (VF == 2 || (VF == 4 && !ST->hasVLX()))
     Scalarize = true;
 
   if (Scalarize)
-    return getGSScalarCost(Opcode, SrcVTy, VariableMask, Alignment, AddressSpace);
+    return getGSScalarCost(Opcode, SrcVTy, VariableMask, Alignment,
+                           AddressSpace);
 
   return getGSVectorCost(Opcode, SrcVTy, Ptr, Alignment, AddressSpace);
 }
@@ -1922,4 +2135,116 @@ bool X86TTIImpl::enableInterleavedAccessVectorization() {
   // but there are currently some unexplained performance artifacts on Atom.
   // As a temporary solution, disable on Atom.
   return !(ST->isAtom() || ST->isSLM());
+}
+
+// Get estimation for interleaved load/store operations and strided load.
+// \p Indices contains indices for strided load.
+// \p Factor - the factor of interleaving.
+// AVX-512 provides 3-src shuffles that significantly reduces the cost.
+int X86TTIImpl::getInterleavedMemoryOpCostAVX512(unsigned Opcode, Type *VecTy,
+                                                 unsigned Factor,
+                                                 ArrayRef<unsigned> Indices,
+                                                 unsigned Alignment,
+                                                 unsigned AddressSpace) {
+
+  // VecTy for interleave memop is <VF*Factor x Elt>.
+  // So, for VF=4, Interleave Factor = 3, Element type = i32 we have
+  // VecTy = <12 x i32>.
+
+  // Calculate the number of memory operations (NumOfMemOps), required
+  // for load/store the VecTy.
+  MVT LegalVT = getTLI()->getTypeLegalizationCost(DL, VecTy).second;
+  unsigned VecTySize = DL.getTypeStoreSize(VecTy);
+  unsigned LegalVTSize = LegalVT.getStoreSize();
+  unsigned NumOfMemOps = (VecTySize + LegalVTSize - 1) / LegalVTSize;
+
+  // Get the cost of one memory operation.
+  Type *SingleMemOpTy = VectorType::get(VecTy->getVectorElementType(),
+                                        LegalVT.getVectorNumElements());
+  unsigned MemOpCost =
+      getMemoryOpCost(Opcode, SingleMemOpTy, Alignment, AddressSpace);
+
+  if (Opcode == Instruction::Load) {
+    // Kind of shuffle depends on number of loaded values.
+    // If we load the entire data in one register, we can use a 1-src shuffle.
+    // Otherwise, we'll merge 2 sources in each operation.
+    TTI::ShuffleKind ShuffleKind =
+        (NumOfMemOps > 1) ? TTI::SK_PermuteTwoSrc : TTI::SK_PermuteSingleSrc;
+
+    unsigned ShuffleCost =
+        getShuffleCost(ShuffleKind, SingleMemOpTy, 0, nullptr);
+
+    unsigned NumOfLoadsInInterleaveGrp =
+        Indices.size() ? Indices.size() : Factor;
+    Type *ResultTy = VectorType::get(VecTy->getVectorElementType(),
+                                     VecTy->getVectorNumElements() / Factor);
+    unsigned NumOfResults =
+        getTLI()->getTypeLegalizationCost(DL, ResultTy).first *
+        NumOfLoadsInInterleaveGrp;
+
+    // About a half of the loads may be folded in shuffles when we have only
+    // one result. If we have more than one result, we do not fold loads at all.
+    unsigned NumOfUnfoldedLoads =
+        NumOfResults > 1 ? NumOfMemOps : NumOfMemOps / 2;
+
+    // Get a number of shuffle operations per result.
+    unsigned NumOfShufflesPerResult =
+        std::max((unsigned)1, (unsigned)(NumOfMemOps - 1));
+
+    // The SK_MergeTwoSrc shuffle clobbers one of src operands.
+    // When we have more than one destination, we need additional instructions
+    // to keep sources.
+    unsigned NumOfMoves = 0;
+    if (NumOfResults > 1 && ShuffleKind == TTI::SK_PermuteTwoSrc)
+      NumOfMoves = NumOfResults * NumOfShufflesPerResult / 2;
+
+    int Cost = NumOfResults * NumOfShufflesPerResult * ShuffleCost +
+               NumOfUnfoldedLoads * MemOpCost + NumOfMoves;
+
+    return Cost;
+  }
+
+  // Store.
+  assert(Opcode == Instruction::Store &&
+         "Expected Store Instruction at this  point");
+
+  // There is no strided stores meanwhile. And store can't be folded in
+  // shuffle.
+  unsigned NumOfSources = Factor; // The number of values to be merged.
+  unsigned ShuffleCost =
+      getShuffleCost(TTI::SK_PermuteTwoSrc, SingleMemOpTy, 0, nullptr);
+  unsigned NumOfShufflesPerStore = NumOfSources - 1;
+
+  // The SK_MergeTwoSrc shuffle clobbers one of src operands.
+  // We need additional instructions to keep sources.
+  unsigned NumOfMoves = NumOfMemOps * NumOfShufflesPerStore / 2;
+  int Cost = NumOfMemOps * (MemOpCost + NumOfShufflesPerStore * ShuffleCost) +
+             NumOfMoves;
+  return Cost;
+}
+
+int X86TTIImpl::getInterleavedMemoryOpCost(unsigned Opcode, Type *VecTy,
+                                           unsigned Factor,
+                                           ArrayRef<unsigned> Indices,
+                                           unsigned Alignment,
+                                           unsigned AddressSpace) {
+  auto isSupportedOnAVX512 = [](Type *VecTy, bool &RequiresBW) {
+    RequiresBW = false;
+    Type *EltTy = VecTy->getVectorElementType();
+    if (EltTy->isFloatTy() || EltTy->isDoubleTy() || EltTy->isIntegerTy(64) ||
+        EltTy->isIntegerTy(32) || EltTy->isPointerTy())
+      return true;
+    if (EltTy->isIntegerTy(16) || EltTy->isIntegerTy(8)) {
+      RequiresBW = true;
+      return true;
+    }
+    return false;
+  };
+  bool RequiresBW;
+  bool HasAVX512Solution = isSupportedOnAVX512(VecTy, RequiresBW);
+  if (ST->hasAVX512() && HasAVX512Solution && (!RequiresBW || ST->hasBWI()))
+    return getInterleavedMemoryOpCostAVX512(Opcode, VecTy, Factor, Indices,
+                                            Alignment, AddressSpace);
+  return BaseT::getInterleavedMemoryOpCost(Opcode, VecTy, Factor, Indices,
+                                           Alignment, AddressSpace);
 }

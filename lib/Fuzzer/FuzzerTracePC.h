@@ -71,6 +71,7 @@ class TracePC {
   void PrintModuleInfo();
 
   void PrintCoverage();
+  void DumpCoverage();
 
   void AddValueForMemcmp(void *caller_pc, const void *s1, const void *s2,
                          size_t n);
@@ -84,6 +85,7 @@ class TracePC {
   TableOfRecentCompares<uint64_t, kTORCSize> TORC8;
 
   void PrintNewPCs();
+  void InitializePrintNewPCs();
   size_t GetNumPCs() const { return Min(kNumPCs, NumGuards + 1); }
   uintptr_t GetPC(size_t Idx) {
     assert(Idx < GetNumPCs());
@@ -144,7 +146,7 @@ size_t TracePC::CollectFeatures(Callback CB) {
   }
   if (UseValueProfile)
     ValueProfileMap.ForEach([&](size_t Idx) {
-      if (CB(NumGuards + Idx))
+      if (CB(NumGuards * 8 + Idx))
         Res++;
     });
   return Res;
