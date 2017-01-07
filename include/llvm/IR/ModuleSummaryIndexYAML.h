@@ -28,14 +28,14 @@ template <> struct ScalarEnumerationTraits<TypeTestResolution::Kind> {
 
 template <> struct MappingTraits<TypeTestResolution> {
   static void mapping(IO &io, TypeTestResolution &res) {
-    io.mapRequired("Kind", res.TheKind);
-    io.mapRequired("SizeBitWidth", res.SizeBitWidth);
+    io.mapOptional("Kind", res.TheKind);
+    io.mapOptional("SizeBitWidth", res.SizeBitWidth);
   }
 };
 
 template <> struct MappingTraits<TypeIdSummary> {
   static void mapping(IO &io, TypeIdSummary& summary) {
-    io.mapRequired("TTRes", summary.TTRes);
+    io.mapOptional("TTRes", summary.TTRes);
   }
 };
 
@@ -53,7 +53,7 @@ namespace yaml {
 
 template <> struct MappingTraits<FunctionSummaryYaml> {
   static void mapping(IO &io, FunctionSummaryYaml& summary) {
-    io.mapRequired("TypeTests", summary.TypeTests);
+    io.mapOptional("TypeTests", summary.TypeTests);
   }
 };
 
@@ -79,7 +79,7 @@ template <> struct CustomMappingTraits<GlobalValueSummaryMapTy> {
     auto &Elem = V[KeyInt];
     for (auto &FSum : FSums) {
       GlobalValueSummary::GVFlags GVFlags(GlobalValue::ExternalLinkage, false,
-                                          false, false);
+                                          false);
       Elem.push_back(llvm::make_unique<FunctionSummary>(
           GVFlags, 0, ArrayRef<ValueInfo>{},
           ArrayRef<FunctionSummary::EdgeTy>{}, std::move(FSum.TypeTests)));
@@ -100,8 +100,8 @@ template <> struct CustomMappingTraits<GlobalValueSummaryMapTy> {
 
 template <> struct MappingTraits<ModuleSummaryIndex> {
   static void mapping(IO &io, ModuleSummaryIndex& index) {
-    io.mapRequired("GlobalValueMap", index.GlobalValueMap);
-    io.mapRequired("TypeIdMap", index.TypeIdMap);
+    io.mapOptional("GlobalValueMap", index.GlobalValueMap);
+    io.mapOptional("TypeIdMap", index.TypeIdMap);
   }
 };
 
