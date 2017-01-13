@@ -484,6 +484,24 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(const TargetMachine &TM,
 // Target Information
 //===----------------------------------------------------------------------===//
 
+static bool fnegFoldsIntoOp(unsigned Opc) {
+  switch (Opc) {
+  case ISD::FADD:
+  case ISD::FSUB:
+  case ISD::FMUL:
+  case ISD::FMA:
+  case ISD::FMAD:
+  case ISD::FSIN:
+  case AMDGPUISD::RCP:
+  case AMDGPUISD::RCP_LEGACY:
+  case AMDGPUISD::SIN_HW:
+  case AMDGPUISD::FMUL_LEGACY:
+    return true;
+  default:
+    return false;
+  }
+}
+
 MVT AMDGPUTargetLowering::getVectorIdxTy(const DataLayout &) const {
   return MVT::i32;
 }
@@ -2738,20 +2756,31 @@ static SDValue foldFreeOpFromSelect(TargetLowering::DAGCombinerInfo &DCI,
     SDValue NewLHS = LHS.getOperand(0);
     SDValue NewRHS = RHS;
 
-    // TODO: Skip for operations where other combines can absord the fneg.
+    // Careful: if the neg can be folded up, don't try to pull it back down.
+    bool ShouldFoldNeg = true;
 
-    if (LHS.getOpcode() == ISD::FNEG)
-      NewRHS = DAG.getNode(ISD::FNEG, SL, VT, RHS);
-    else if (CRHS->isNegative())
-      return SDValue();
+    if (NewLHS.hasOneUse()) {
+      unsigned Opc = NewLHS.getOpcode();
+      if (LHS.getOpcode() == ISD::FNEG && fnegFoldsIntoOp(Opc))
+        ShouldFoldNeg = false;
+      if (LHS.getOpcode() == ISD::FABS && Opc == ISD::FMUL)
+        ShouldFoldNeg = false;
+    }
 
-    if (Inv)
-      std::swap(NewLHS, NewRHS);
+    if (ShouldFoldNeg) {
+      if (LHS.getOpcode() == ISD::FNEG)
+        NewRHS = DAG.getNode(ISD::FNEG, SL, VT, RHS);
+      else if (CRHS->isNegative())
+        return SDValue();
 
-    SDValue NewSelect = DAG.getNode(ISD::SELECT, SL, VT,
-                                    Cond, NewLHS, NewRHS);
-    DCI.AddToWorklist(NewSelect.getNode());
-    return DAG.getNode(LHS.getOpcode(), SL, VT, NewSelect);
+      if (Inv)
+        std::swap(NewLHS, NewRHS);
+
+      SDValue NewSelect = DAG.getNode(ISD::SELECT, SL, VT,
+                                      Cond, NewLHS, NewRHS);
+      DCI.AddToWorklist(NewSelect.getNode());
+      return DAG.getNode(LHS.getOpcode(), SL, VT, NewSelect);
+    }
   }
 
   return SDValue();
@@ -2806,19 +2835,6 @@ SDValue AMDGPUTargetLowering::performSelectCombine(SDNode *N,
   return performCtlzCombine(SDLoc(N), Cond, True, False, DCI);
 }
 
-static bool fnegFoldsIntoOp(unsigned Opc) {
-  switch (Opc) {
-  case ISD::FADD:
-  case ISD::FSUB:
-  case ISD::FMUL:
-  case ISD::FMA:
-  case ISD::FMAD:
-    return true;
-  default:
-    return false;
-  }
-}
-
 SDValue AMDGPUTargetLowering::performFNegCombine(SDNode *N,
                                                  DAGCombinerInfo &DCI) const {
   SelectionDAG &DAG = DCI.DAG;
@@ -2858,8 +2874,10 @@ SDValue AMDGPUTargetLowering::performFNegCombine(SDNode *N,
       DAG.ReplaceAllUsesWith(N0, DAG.getNode(ISD::FNEG, SL, VT, Res));
     return Res;
   }
-  case ISD::FMUL: {
+  case ISD::FMUL:
+  case AMDGPUISD::FMUL_LEGACY: {
     // (fneg (fmul x, y)) -> (fmul x, (fneg y))
+    // (fneg (fmul_legacy x, y)) -> (fmul_legacy x, (fneg y))
     SDValue LHS = N0.getOperand(0);
     SDValue RHS = N0.getOperand(1);
 
@@ -2870,7 +2888,7 @@ SDValue AMDGPUTargetLowering::performFNegCombine(SDNode *N,
     else
       RHS = DAG.getNode(ISD::FNEG, SL, VT, RHS);
 
-    SDValue Res = DAG.getNode(ISD::FMUL, SL, VT, LHS, RHS);
+    SDValue Res = DAG.getNode(Opc, SL, VT, LHS, RHS);
     if (!N0.hasOneUse())
       DAG.ReplaceAllUsesWith(N0, DAG.getNode(ISD::FNEG, SL, VT, Res));
     return Res;
@@ -2898,6 +2916,42 @@ SDValue AMDGPUTargetLowering::performFNegCombine(SDNode *N,
     if (!N0.hasOneUse())
       DAG.ReplaceAllUsesWith(N0, DAG.getNode(ISD::FNEG, SL, VT, Res));
     return Res;
+  }
+  case ISD::FP_EXTEND:
+  case AMDGPUISD::RCP:
+  case AMDGPUISD::RCP_LEGACY:
+  case ISD::FSIN:
+  case AMDGPUISD::SIN_HW: {
+    SDValue CvtSrc = N0.getOperand(0);
+    if (CvtSrc.getOpcode() == ISD::FNEG) {
+      // (fneg (fp_extend (fneg x))) -> (fp_extend x)
+      // (fneg (rcp (fneg x))) -> (rcp x)
+      return DAG.getNode(Opc, SL, VT, CvtSrc.getOperand(0));
+    }
+
+    if (!N0.hasOneUse())
+      return SDValue();
+
+    // (fneg (fp_extend x)) -> (fp_extend (fneg x))
+    // (fneg (rcp x)) -> (rcp (fneg x))
+    SDValue Neg = DAG.getNode(ISD::FNEG, SL, CvtSrc.getValueType(), CvtSrc);
+    return DAG.getNode(Opc, SL, VT, Neg);
+  }
+  case ISD::FP_ROUND: {
+    SDValue CvtSrc = N0.getOperand(0);
+
+    if (CvtSrc.getOpcode() == ISD::FNEG) {
+      // (fneg (fp_round (fneg x))) -> (fp_round x)
+      return DAG.getNode(ISD::FP_ROUND, SL, VT,
+                         CvtSrc.getOperand(0), N0.getOperand(1));
+    }
+
+    if (!N0.hasOneUse())
+      return SDValue();
+
+    // (fneg (fp_round x)) -> (fp_round (fneg x))
+    SDValue Neg = DAG.getNode(ISD::FNEG, SL, CvtSrc.getValueType(), CvtSrc);
+    return DAG.getNode(ISD::FP_ROUND, SL, VT, Neg, N0.getOperand(1));
   }
   default:
     return SDValue();

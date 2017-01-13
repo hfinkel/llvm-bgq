@@ -97,12 +97,12 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
   const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
   setStackPointerRegisterToSaveRestore(RegInfo->getStackRegister());
 
-  // Bypass expensive divides on Atom when compiling with O2.
+  // Bypass expensive divides and use cheaper ones.
   if (TM.getOptLevel() >= CodeGenOpt::Default) {
     if (Subtarget.hasSlowDivide32())
       addBypassSlowDiv(32, 8);
     if (Subtarget.hasSlowDivide64() && Subtarget.is64Bit())
-      addBypassSlowDiv(64, 16);
+      addBypassSlowDiv(64, 32);
   }
 
   if (Subtarget.isTargetKnownWindowsMSVC() ||
@@ -8307,6 +8307,11 @@ static SDValue lowerVectorShuffleAsBitBlend(const SDLoc &DL, MVT VT, SDValue V1,
   return DAG.getNode(ISD::OR, DL, VT, V1, V2);
 }
 
+static SDValue getVectorMaskingNode(SDValue Op, SDValue Mask,
+                                    SDValue PreservedSrc,
+                                    const X86Subtarget &Subtarget,
+                                    SelectionDAG &DAG);
+
 /// \brief Try to emit a blend instruction for a shuffle.
 ///
 /// This doesn't do any checks for the availability of instructions for blending
@@ -8427,6 +8432,13 @@ static SDValue lowerVectorShuffleAsBlend(const SDLoc &DL, MVT VT, SDValue V1,
   case MVT::v32i8: {
     assert((VT.is128BitVector() || Subtarget.hasAVX2()) &&
            "256-bit byte-blends require AVX2 support!");
+		   
+    if (Subtarget.hasBWI() && Subtarget.hasVLX()) {
+      MVT IntegerType =
+          MVT::getIntegerVT(std::max((int)VT.getVectorNumElements(), 8));
+      SDValue MaskNode = DAG.getConstant(BlendMask, DL, IntegerType);
+      return getVectorMaskingNode(V1, MaskNode, V2, Subtarget, DAG);
+    }
 
     // Attempt to lower to a bitmask if we can. VPAND is faster than VPBLENDVB.
     if (SDValue Masked =
@@ -8465,7 +8477,17 @@ static SDValue lowerVectorShuffleAsBlend(const SDLoc &DL, MVT VT, SDValue V1,
         VT, DAG.getNode(ISD::VSELECT, DL, BlendVT,
                         DAG.getBuildVector(BlendVT, DL, VSELECTMask), V1, V2));
   }
-
+  case MVT::v16f32:
+  case MVT::v8f64:
+  case MVT::v8i64:
+  case MVT::v16i32:
+  case MVT::v32i16:
+  case MVT::v64i8: {
+    MVT IntegerType =
+        MVT::getIntegerVT(std::max((int)VT.getVectorNumElements(), 8));
+    SDValue MaskNode = DAG.getConstant(BlendMask, DL, IntegerType);
+    return getVectorMaskingNode(V1, MaskNode, V2, Subtarget, DAG);
+  }
   default:
     llvm_unreachable("Not a supported integer vector type!");
   }
@@ -12891,6 +12913,10 @@ static SDValue lowerV8F64VectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
                                              V2, DAG, Subtarget))
     return V;
 
+  if (SDValue Blend = lowerVectorShuffleAsBlend(DL, MVT::v8f64, V1, V2, Mask,
+                                                Zeroable, Subtarget, DAG))
+    return Blend;
+
   return lowerVectorShuffleWithPERMV(DL, MVT::v8f64, Mask, V1, V2, DAG);
 }
 
@@ -12924,6 +12950,10 @@ static SDValue lowerV16F32VectorShuffle(SDLoc DL, ArrayRef<int> Mask,
     if (SDValue Unpck =
             lowerVectorShuffleWithUNPCK(DL, MVT::v16f32, Mask, V1, V2, DAG))
       return Unpck;
+
+    if (SDValue Blend = lowerVectorShuffleAsBlend(DL, MVT::v16f32, V1, V2, Mask,
+                                                  Zeroable, Subtarget, DAG))
+      return Blend;
 
     // Otherwise, fall back to a SHUFPS sequence.
     return lowerVectorShuffleWithSHUFPS(DL, MVT::v16f32, RepeatedMask, V1, V2, DAG);
@@ -12994,6 +13024,10 @@ static SDValue lowerV8I64VectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
                                              V2, DAG, Subtarget))
     return V;
 
+  if (SDValue Blend = lowerVectorShuffleAsBlend(DL, MVT::v8i64, V1, V2, Mask,
+                                                Zeroable, Subtarget, DAG))
+    return Blend;
+
   return lowerVectorShuffleWithPERMV(DL, MVT::v8i64, Mask, V1, V2, DAG);
 }
 
@@ -13062,6 +13096,9 @@ static SDValue lowerV16I32VectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
                                              V1, V2, DAG, Subtarget))
     return V;
 
+  if (SDValue Blend = lowerVectorShuffleAsBlend(DL, MVT::v16i32, V1, V2, Mask,
+                                                Zeroable, Subtarget, DAG))
+    return Blend;
   return lowerVectorShuffleWithPERMV(DL, MVT::v16i32, Mask, V1, V2, DAG);
 }
 
@@ -13108,6 +13145,10 @@ static SDValue lowerV32I16VectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
           DL, MVT::v32i16, V1, RepeatedMask, Subtarget, DAG);
     }
   }
+
+  if (SDValue Blend = lowerVectorShuffleAsBlend(DL, MVT::v32i16, V1, V2, Mask,
+                                                Zeroable, Subtarget, DAG))
+    return Blend;
 
   return lowerVectorShuffleWithPERMV(DL, MVT::v32i16, Mask, V1, V2, DAG);
 }
@@ -13158,6 +13199,10 @@ static SDValue lowerV64I8VectorShuffle(const SDLoc &DL, ArrayRef<int> Mask,
   if (SDValue V = lowerShuffleAsRepeatedMaskAndLanePermute(
           DL, MVT::v64i8, V1, V2, Mask, Subtarget, DAG))
     return V;
+
+  if (SDValue Blend = lowerVectorShuffleAsBlend(DL, MVT::v64i8, V1, V2, Mask,
+                                                Zeroable, Subtarget, DAG))
+    return Blend;
 
   // FIXME: Implement direct support for this type!
   return splitAndLowerVectorShuffle(DL, MVT::v64i8, V1, V2, Mask, DAG);
@@ -16018,6 +16063,12 @@ SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC, const SDLoc &dl,
       }
   }
 
+  // Sometimes flags can be set either with an AND or with an SRL/SHL
+  // instruction. SRL/SHL variant should be preferred for masks longer than this
+  // number of bits.
+  const int ShiftToAndMaxMaskWidth = 32;
+  const bool ZeroCheck = (X86CC == X86::COND_E || X86CC == X86::COND_NE);
+
   // NOTICE: In the code below we use ArithOp to hold the arithmetic operation
   // which may be the result of a CAST.  We use the variable 'Op', which is the
   // non-casted variable when we check for possible users.
@@ -16066,7 +16117,7 @@ SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC, const SDLoc &dl,
     // If we have a constant logical shift that's only used in a comparison
     // against zero turn it into an equivalent AND. This allows turning it into
     // a TEST instruction later.
-    if ((X86CC == X86::COND_E || X86CC == X86::COND_NE) && Op->hasOneUse() &&
+    if (ZeroCheck && Op->hasOneUse() &&
         isa<ConstantSDNode>(Op->getOperand(1)) && !hasNonFlagsUse(Op)) {
       EVT VT = Op.getValueType();
       unsigned BitWidth = VT.getSizeInBits();
@@ -16076,7 +16127,7 @@ SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC, const SDLoc &dl,
       APInt Mask = ArithOp.getOpcode() == ISD::SRL
                        ? APInt::getHighBitsSet(BitWidth, BitWidth - ShAmt)
                        : APInt::getLowBitsSet(BitWidth, BitWidth - ShAmt);
-      if (!Mask.isSignedIntN(32)) // Avoid large immediates.
+      if (!Mask.isSignedIntN(ShiftToAndMaxMaskWidth))
         break;
       Op = DAG.getNode(ISD::AND, dl, VT, Op->getOperand(0),
                        DAG.getConstant(Mask, dl, VT));
@@ -16085,18 +16136,59 @@ SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC, const SDLoc &dl,
 
   case ISD::AND:
     // If the primary 'and' result isn't used, don't bother using X86ISD::AND,
-    // because a TEST instruction will be better.
+    // because a TEST instruction will be better. However, AND should be
+    // preferred if the instruction can be combined into ANDN.
     if (!hasNonFlagsUse(Op)) {
       SDValue Op0 = ArithOp->getOperand(0);
       SDValue Op1 = ArithOp->getOperand(1);
       EVT VT = ArithOp.getValueType();
       bool isAndn = isBitwiseNot(Op0) || isBitwiseNot(Op1);
       bool isLegalAndnType = VT == MVT::i32 || VT == MVT::i64;
+      bool isProperAndn = isAndn && isLegalAndnType && Subtarget.hasBMI();
 
-      // But if we can combine this into an ANDN operation, then create an AND
-      // now and allow it to be pattern matched into an ANDN.
-      if (!Subtarget.hasBMI() || !isAndn || !isLegalAndnType)
+      // If we cannot select an ANDN instruction, check if we can replace
+      // AND+IMM64 with a shift before giving up. This is possible for masks
+      // like 0xFF000000 or 0x00FFFFFF and if we care only about the zero flag.
+      if (!isProperAndn) {
+        if (!ZeroCheck)
+          break;
+
+        assert(!isa<ConstantSDNode>(Op0) && "AND node isn't canonicalized");
+        auto *CN = dyn_cast<ConstantSDNode>(Op1);
+        if (!CN)
+          break;
+
+        const APInt &Mask = CN->getAPIntValue();
+        if (Mask.isSignedIntN(ShiftToAndMaxMaskWidth))
+          break; // Prefer TEST instruction.
+
+        unsigned BitWidth = Mask.getBitWidth();
+        unsigned LeadingOnes = Mask.countLeadingOnes();
+        unsigned TrailingZeros = Mask.countTrailingZeros();
+
+        if (LeadingOnes + TrailingZeros == BitWidth) {
+          assert(TrailingZeros < VT.getSizeInBits() &&
+                 "Shift amount should be less than the type width");
+          MVT ShTy = getScalarShiftAmountTy(DAG.getDataLayout(), VT);
+          SDValue ShAmt = DAG.getConstant(TrailingZeros, dl, ShTy);
+          Op = DAG.getNode(ISD::SRL, dl, VT, Op0, ShAmt);
+          break;
+        }
+
+        unsigned LeadingZeros = Mask.countLeadingZeros();
+        unsigned TrailingOnes = Mask.countTrailingOnes();
+
+        if (LeadingZeros + TrailingOnes == BitWidth) {
+          assert(LeadingZeros < VT.getSizeInBits() &&
+                 "Shift amount should be less than the type width");
+          MVT ShTy = getScalarShiftAmountTy(DAG.getDataLayout(), VT);
+          SDValue ShAmt = DAG.getConstant(LeadingZeros, dl, ShTy);
+          Op = DAG.getNode(ISD::SHL, dl, VT, Op0, ShAmt);
+          break;
+        }
+
         break;
+      }
     }
     LLVM_FALLTHROUGH;
   case ISD::SUB:
@@ -16116,7 +16208,7 @@ SDValue X86TargetLowering::EmitTest(SDValue Op, unsigned X86CC, const SDLoc &dl,
     case ISD::XOR: Opcode = X86ISD::XOR; break;
     case ISD::AND: Opcode = X86ISD::AND; break;
     case ISD::OR: {
-      if (!NeedTruncation && (X86CC == X86::COND_E || X86CC == X86::COND_NE)) {
+      if (!NeedTruncation && ZeroCheck) {
         if (SDValue EFLAGS = LowerVectorAllZeroTest(Op, Subtarget, DAG))
           return EFLAGS;
       }

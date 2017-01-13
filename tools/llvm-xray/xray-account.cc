@@ -428,11 +428,11 @@ static CommandRegistration Unused(&Account, []() -> Error {
   xray::InstrumentationMapExtractor Extractor(AccountInstrMap, InstrMapFormat,
                                               Err);
   if (auto E = handleErrors(
-          std::move(Err), [&](std::unique_ptr<StringError> E) -> Error {
-            if (E->convertToErrorCode() == std::errc::no_such_file_or_directory)
-              return Error::success();
-            return Error(std::move(E));
-          }))
+        std::move(Err), [&](std::unique_ptr<StringError> SE) -> Error {
+          if (SE->convertToErrorCode() == std::errc::no_such_file_or_directory)
+            return Error::success();
+          return Error(std::move(SE));
+        }))
     return E;
 
   raw_fd_ostream OS(AccountOutput, EC, sys::fs::OpenFlags::F_Text);
@@ -463,7 +463,7 @@ static CommandRegistration Unused(&Account, []() -> Error {
         return make_error<StringError>(
             Twine("Failed accounting function calls in file '") + AccountInput +
                 "'.",
-            std::make_error_code(std::errc::bad_message));
+            std::make_error_code(std::errc::executable_format_error));
     }
     switch (AccountOutputFormat) {
     case AccountOutputFormats::TEXT:
@@ -477,7 +477,7 @@ static CommandRegistration Unused(&Account, []() -> Error {
     return joinErrors(
         make_error<StringError>(
             Twine("Failed loading input file '") + AccountInput + "'",
-            std::make_error_code(std::errc::protocol_error)),
+            std::make_error_code(std::errc::executable_format_error)),
         TraceOrErr.takeError());
   }
 
