@@ -437,14 +437,18 @@ unsigned ARMBaseInstrInfo::insertBranch(MachineBasicBlock &MBB,
       else
         BuildMI(&MBB, DL, get(BOpc)).addMBB(TBB);
     } else
-      BuildMI(&MBB, DL, get(BccOpc)).addMBB(TBB)
-        .addImm(Cond[0].getImm()).addOperand(Cond[1]);
+      BuildMI(&MBB, DL, get(BccOpc))
+          .addMBB(TBB)
+          .addImm(Cond[0].getImm())
+          .add(Cond[1]);
     return 1;
   }
 
   // Two-way conditional branch.
-  BuildMI(&MBB, DL, get(BccOpc)).addMBB(TBB)
-    .addImm(Cond[0].getImm()).addOperand(Cond[1]);
+  BuildMI(&MBB, DL, get(BccOpc))
+      .addMBB(TBB)
+      .addImm(Cond[0].getImm())
+      .add(Cond[1]);
   if (isThumb)
     BuildMI(&MBB, DL, get(BOpc)).addMBB(FBB).addImm(ARMCC::AL).addReg(0);
   else
@@ -730,9 +734,10 @@ void ARMBaseInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   bool GPRSrc = ARM::GPRRegClass.contains(SrcReg);
 
   if (GPRDest && GPRSrc) {
-    AddDefaultCC(BuildMI(MBB, I, DL, get(ARM::MOVr), DestReg)
-                     .addReg(SrcReg, getKillRegState(KillSrc))
-                     .add(predOps(ARMCC::AL)));
+    BuildMI(MBB, I, DL, get(ARM::MOVr), DestReg)
+        .addReg(SrcReg, getKillRegState(KillSrc))
+        .add(predOps(ARMCC::AL))
+        .add(condCodeOp());
     return;
   }
 
@@ -846,7 +851,7 @@ void ARMBaseInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     Mov = Mov.add(predOps(ARMCC::AL));
     // MOVr can set CC.
     if (Opc == ARM::MOVr)
-      Mov = AddDefaultCC(Mov);
+      Mov = Mov.add(condCodeOp());
   }
   // Add implicit super-register defs and kills to the last instruction.
   Mov->addRegisterDefined(DestReg, TRI);
@@ -1279,7 +1284,7 @@ void ARMBaseInstrInfo::expandMEMCPY(MachineBasicBlock::iterator MI) const {
     LDM = BuildMI(*BB, MI, dl, TII->get(isThumb2 ? ARM::t2LDMIA_UPD
                                                  : isThumb1 ? ARM::tLDMIA_UPD
                                                             : ARM::LDMIA_UPD))
-             .addOperand(MI->getOperand(1));
+              .add(MI->getOperand(1));
   } else {
     LDM = BuildMI(*BB, MI, dl, TII->get(isThumb2 ? ARM::t2LDMIA : ARM::LDMIA));
   }
@@ -1288,13 +1293,13 @@ void ARMBaseInstrInfo::expandMEMCPY(MachineBasicBlock::iterator MI) const {
     STM = BuildMI(*BB, MI, dl, TII->get(isThumb2 ? ARM::t2STMIA_UPD
                                                  : isThumb1 ? ARM::tSTMIA_UPD
                                                             : ARM::STMIA_UPD))
-             .addOperand(MI->getOperand(0));
+              .add(MI->getOperand(0));
   } else {
     STM = BuildMI(*BB, MI, dl, TII->get(isThumb2 ? ARM::t2STMIA : ARM::STMIA));
   }
 
-  LDM.addOperand(MI->getOperand(3)).add(predOps(ARMCC::AL));
-  STM.addOperand(MI->getOperand(2)).add(predOps(ARMCC::AL));
+  LDM.add(MI->getOperand(3)).add(predOps(ARMCC::AL));
+  STM.add(MI->getOperand(2)).add(predOps(ARMCC::AL));
 
   // Sort the scratch registers into ascending order.
   const TargetRegisterInfo &TRI = getRegisterInfo();
@@ -1951,25 +1956,25 @@ ARMBaseInstrInfo::optimizeSelect(MachineInstr &MI,
   const MCInstrDesc &DefDesc = DefMI->getDesc();
   for (unsigned i = 1, e = DefDesc.getNumOperands();
        i != e && !DefDesc.OpInfo[i].isPredicate(); ++i)
-    NewMI.addOperand(DefMI->getOperand(i));
+    NewMI.add(DefMI->getOperand(i));
 
   unsigned CondCode = MI.getOperand(3).getImm();
   if (Invert)
     NewMI.addImm(ARMCC::getOppositeCondition(ARMCC::CondCodes(CondCode)));
   else
     NewMI.addImm(CondCode);
-  NewMI.addOperand(MI.getOperand(4));
+  NewMI.add(MI.getOperand(4));
 
   // DefMI is not the -S version that sets CPSR, so add an optional %noreg.
   if (NewMI->hasOptionalDef())
-    AddDefaultCC(NewMI);
+    NewMI.add(condCodeOp());
 
   // The output register value when the predicate is false is an implicit
   // register operand tied to the first def.
   // The tie makes the register allocator ensure the FalseReg is allocated the
   // same register as operand 0.
   FalseReg.setImplicit();
-  NewMI.addOperand(FalseReg);
+  NewMI.add(FalseReg);
   NewMI->tieOperands(0, NewMI->getNumOperands() - 1);
 
   // Update SeenMIs set: register newly created MI and erase removed DefMI.
@@ -2185,7 +2190,7 @@ bool llvm::tryFoldSPUpdateIntoPushPop(const ARMSubtarget &Subtarget,
   // Add the complete list back in.
   MachineInstrBuilder MIB(MF, &*MI);
   for (int i = RegList.size() - 1; i >= 0; --i)
-    MIB.addOperand(RegList[i]);
+    MIB.add(RegList[i]);
 
   return true;
 }
@@ -2828,11 +2833,12 @@ bool ARMBaseInstrInfo::FoldImmediate(MachineInstr &UseMI, MachineInstr &DefMI,
   unsigned Reg1 = UseMI.getOperand(OpIdx).getReg();
   bool isKill = UseMI.getOperand(OpIdx).isKill();
   unsigned NewReg = MRI->createVirtualRegister(MRI->getRegClass(Reg));
-  AddDefaultCC(BuildMI(*UseMI.getParent(), UseMI, UseMI.getDebugLoc(),
-                       get(NewUseOpc), NewReg)
-                   .addReg(Reg1, getKillRegState(isKill))
-                   .addImm(SOImmValV1)
-                   .add(predOps(ARMCC::AL)));
+  BuildMI(*UseMI.getParent(), UseMI, UseMI.getDebugLoc(), get(NewUseOpc),
+          NewReg)
+      .addReg(Reg1, getKillRegState(isKill))
+      .addImm(SOImmValV1)
+      .add(predOps(ARMCC::AL))
+      .add(condCodeOp());
   UseMI.setDesc(get(NewUseOpc));
   UseMI.getOperand(1).setReg(NewReg);
   UseMI.getOperand(1).setIsKill();

@@ -97,171 +97,6 @@ namespace {
   };
 }
 
-void ARMTargetLowering::InitLibcallCallingConvs() {
-  // The builtins on ARM always use AAPCS, irrespective of wheter C is AAPCS or
-  // AAPCS_VFP.
-  for (const auto LC : {
-           RTLIB::SHL_I16,
-           RTLIB::SHL_I32,
-           RTLIB::SHL_I64,
-           RTLIB::SHL_I128,
-           RTLIB::SRL_I16,
-           RTLIB::SRL_I32,
-           RTLIB::SRL_I64,
-           RTLIB::SRL_I128,
-           RTLIB::SRA_I16,
-           RTLIB::SRA_I32,
-           RTLIB::SRA_I64,
-           RTLIB::SRA_I128,
-           RTLIB::MUL_I8,
-           RTLIB::MUL_I16,
-           RTLIB::MUL_I32,
-           RTLIB::MUL_I64,
-           RTLIB::MUL_I128,
-           RTLIB::MULO_I32,
-           RTLIB::MULO_I64,
-           RTLIB::MULO_I128,
-           RTLIB::SDIV_I8,
-           RTLIB::SDIV_I16,
-           RTLIB::SDIV_I32,
-           RTLIB::SDIV_I64,
-           RTLIB::SDIV_I128,
-           RTLIB::UDIV_I8,
-           RTLIB::UDIV_I16,
-           RTLIB::UDIV_I32,
-           RTLIB::UDIV_I64,
-           RTLIB::UDIV_I128,
-           RTLIB::SREM_I8,
-           RTLIB::SREM_I16,
-           RTLIB::SREM_I32,
-           RTLIB::SREM_I64,
-           RTLIB::SREM_I128,
-           RTLIB::UREM_I8,
-           RTLIB::UREM_I16,
-           RTLIB::UREM_I32,
-           RTLIB::UREM_I64,
-           RTLIB::UREM_I128,
-           RTLIB::SDIVREM_I8,
-           RTLIB::SDIVREM_I16,
-           RTLIB::SDIVREM_I32,
-           RTLIB::SDIVREM_I64,
-           RTLIB::SDIVREM_I128,
-           RTLIB::UDIVREM_I8,
-           RTLIB::UDIVREM_I16,
-           RTLIB::UDIVREM_I32,
-           RTLIB::UDIVREM_I64,
-           RTLIB::UDIVREM_I128,
-           RTLIB::NEG_I32,
-           RTLIB::NEG_I64,
-           RTLIB::ADD_F32,
-           RTLIB::ADD_F64,
-           RTLIB::ADD_F80,
-           RTLIB::ADD_F128,
-           RTLIB::SUB_F32,
-           RTLIB::SUB_F64,
-           RTLIB::SUB_F80,
-           RTLIB::SUB_F128,
-           RTLIB::MUL_F32,
-           RTLIB::MUL_F64,
-           RTLIB::MUL_F80,
-           RTLIB::MUL_F128,
-           RTLIB::DIV_F32,
-           RTLIB::DIV_F64,
-           RTLIB::DIV_F80,
-           RTLIB::DIV_F128,
-           RTLIB::POWI_F32,
-           RTLIB::POWI_F64,
-           RTLIB::POWI_F80,
-           RTLIB::POWI_F128,
-           RTLIB::FPEXT_F64_F128,
-           RTLIB::FPEXT_F32_F128,
-           RTLIB::FPEXT_F32_F64,
-           RTLIB::FPEXT_F16_F32,
-           RTLIB::FPROUND_F32_F16,
-           RTLIB::FPROUND_F64_F16,
-           RTLIB::FPROUND_F80_F16,
-           RTLIB::FPROUND_F128_F16,
-           RTLIB::FPROUND_F64_F32,
-           RTLIB::FPROUND_F80_F32,
-           RTLIB::FPROUND_F128_F32,
-           RTLIB::FPROUND_F80_F64,
-           RTLIB::FPROUND_F128_F64,
-           RTLIB::FPTOSINT_F32_I32,
-           RTLIB::FPTOSINT_F32_I64,
-           RTLIB::FPTOSINT_F32_I128,
-           RTLIB::FPTOSINT_F64_I32,
-           RTLIB::FPTOSINT_F64_I64,
-           RTLIB::FPTOSINT_F64_I128,
-           RTLIB::FPTOSINT_F80_I32,
-           RTLIB::FPTOSINT_F80_I64,
-           RTLIB::FPTOSINT_F80_I128,
-           RTLIB::FPTOSINT_F128_I32,
-           RTLIB::FPTOSINT_F128_I64,
-           RTLIB::FPTOSINT_F128_I128,
-           RTLIB::FPTOUINT_F32_I32,
-           RTLIB::FPTOUINT_F32_I64,
-           RTLIB::FPTOUINT_F32_I128,
-           RTLIB::FPTOUINT_F64_I32,
-           RTLIB::FPTOUINT_F64_I64,
-           RTLIB::FPTOUINT_F64_I128,
-           RTLIB::FPTOUINT_F80_I32,
-           RTLIB::FPTOUINT_F80_I64,
-           RTLIB::FPTOUINT_F80_I128,
-           RTLIB::FPTOUINT_F128_I32,
-           RTLIB::FPTOUINT_F128_I64,
-           RTLIB::FPTOUINT_F128_I128,
-           RTLIB::SINTTOFP_I32_F32,
-           RTLIB::SINTTOFP_I32_F64,
-           RTLIB::SINTTOFP_I32_F80,
-           RTLIB::SINTTOFP_I32_F128,
-           RTLIB::SINTTOFP_I64_F32,
-           RTLIB::SINTTOFP_I64_F64,
-           RTLIB::SINTTOFP_I64_F80,
-           RTLIB::SINTTOFP_I64_F128,
-           RTLIB::SINTTOFP_I128_F32,
-           RTLIB::SINTTOFP_I128_F64,
-           RTLIB::SINTTOFP_I128_F80,
-           RTLIB::SINTTOFP_I128_F128,
-           RTLIB::UINTTOFP_I32_F32,
-           RTLIB::UINTTOFP_I32_F64,
-           RTLIB::UINTTOFP_I32_F80,
-           RTLIB::UINTTOFP_I32_F128,
-           RTLIB::UINTTOFP_I64_F32,
-           RTLIB::UINTTOFP_I64_F64,
-           RTLIB::UINTTOFP_I64_F80,
-           RTLIB::UINTTOFP_I64_F128,
-           RTLIB::UINTTOFP_I128_F32,
-           RTLIB::UINTTOFP_I128_F64,
-           RTLIB::UINTTOFP_I128_F80,
-           RTLIB::UINTTOFP_I128_F128,
-           RTLIB::OEQ_F32,
-           RTLIB::OEQ_F64,
-           RTLIB::OEQ_F128,
-           RTLIB::UNE_F32,
-           RTLIB::UNE_F64,
-           RTLIB::UNE_F128,
-           RTLIB::OGE_F32,
-           RTLIB::OGE_F64,
-           RTLIB::OGE_F128,
-           RTLIB::OLT_F32,
-           RTLIB::OLT_F64,
-           RTLIB::OLT_F128,
-           RTLIB::OLE_F32,
-           RTLIB::OLE_F64,
-           RTLIB::OLE_F128,
-           RTLIB::OGT_F32,
-           RTLIB::OGT_F64,
-           RTLIB::OGT_F128,
-           RTLIB::UO_F32,
-           RTLIB::UO_F64,
-           RTLIB::UO_F128,
-           RTLIB::O_F32,
-           RTLIB::O_F64,
-           RTLIB::O_F128,
-       })
-  setLibcallCallingConv(LC, CallingConv::ARM_AAPCS);
-}
-
 // The APCS parameter registers.
 static const MCPhysReg GPRArgRegs[] = {
   ARM::R0, ARM::R1, ARM::R2, ARM::R3
@@ -349,7 +184,22 @@ ARMTargetLowering::ARMTargetLowering(const TargetMachine &TM,
 
   setBooleanVectorContents(ZeroOrNegativeOneBooleanContent);
 
-  InitLibcallCallingConvs();
+  if (!Subtarget->isTargetDarwin() && !Subtarget->isTargetIOS() &&
+      !Subtarget->isTargetWatchOS()) {
+    const auto &E = Subtarget->getTargetTriple().getEnvironment();
+
+    bool IsHFTarget = E == Triple::EABIHF || E == Triple::GNUEABIHF ||
+                      E == Triple::MuslEABIHF;
+    // Windows is a special case.  Technically, we will replace all of the "GNU"
+    // calls with calls to MSVCRT if appropriate and adjust the calling
+    // convention then.
+    IsHFTarget = IsHFTarget || Subtarget->isTargetWindows();
+
+    for (int LCID = 0; LCID < RTLIB::UNKNOWN_LIBCALL; ++LCID)
+      setLibcallCallingConv(static_cast<RTLIB::Libcall>(LCID),
+                            IsHFTarget ? CallingConv::ARM_AAPCS_VFP
+                                       : CallingConv::ARM_AAPCS);
+  }
 
   if (Subtarget->isTargetMachO()) {
     // Uses VFP for Thumb libfuncs if available.
@@ -3084,7 +2934,7 @@ static bool isSimpleType(Type *T) {
 }
 
 static SDValue promoteToConstantPool(const GlobalValue *GV, SelectionDAG &DAG,
-                                     EVT PtrVT, SDLoc dl) {
+                                     EVT PtrVT, const SDLoc &dl) {
   // If we're creating a pool entry for a constant global with unnamed address,
   // and the global is small enough, we can emit it inline into the constant pool
   // to save ourselves an indirection.
@@ -7854,10 +7704,11 @@ void ARMTargetLowering::SetupEntryBlockForSjLj(MachineInstr &MI,
         .add(predOps(ARMCC::AL));
     // Set the low bit because of thumb mode.
     unsigned NewVReg2 = MRI->createVirtualRegister(TRC);
-    AddDefaultCC(BuildMI(*MBB, MI, dl, TII->get(ARM::t2ORRri), NewVReg2)
-                     .addReg(NewVReg1, RegState::Kill)
-                     .addImm(0x01)
-                     .add(predOps(ARMCC::AL)));
+    BuildMI(*MBB, MI, dl, TII->get(ARM::t2ORRri), NewVReg2)
+        .addReg(NewVReg1, RegState::Kill)
+        .addImm(0x01)
+        .add(predOps(ARMCC::AL))
+        .add(condCodeOp());
     unsigned NewVReg3 = MRI->createVirtualRegister(TRC);
     BuildMI(*MBB, MI, dl, TII->get(ARM::tPICADD), NewVReg3)
       .addReg(NewVReg2, RegState::Kill)
@@ -8084,11 +7935,12 @@ void ARMTargetLowering::EmitSjLjDispatchBlock(MachineInstr &MI,
         .add(predOps(ARMCC::AL));
 
     unsigned NewVReg4 = MRI->createVirtualRegister(TRC);
-    AddDefaultCC(BuildMI(DispContBB, dl, TII->get(ARM::t2ADDrs), NewVReg4)
-                     .addReg(NewVReg3, RegState::Kill)
-                     .addReg(NewVReg1)
-                     .addImm(ARM_AM::getSORegOpc(ARM_AM::lsl, 2))
-                     .add(predOps(ARMCC::AL)));
+    BuildMI(DispContBB, dl, TII->get(ARM::t2ADDrs), NewVReg4)
+        .addReg(NewVReg3, RegState::Kill)
+        .addReg(NewVReg1)
+        .addImm(ARM_AM::getSORegOpc(ARM_AM::lsl, 2))
+        .add(predOps(ARMCC::AL))
+        .add(condCodeOp());
 
     BuildMI(DispContBB, dl, TII->get(ARM::t2BR_JT))
       .addReg(NewVReg4, RegState::Kill)
@@ -8237,10 +8089,11 @@ void ARMTargetLowering::EmitSjLjDispatchBlock(MachineInstr &MI,
       .addReg(ARM::CPSR);
 
     unsigned NewVReg3 = MRI->createVirtualRegister(TRC);
-    AddDefaultCC(BuildMI(DispContBB, dl, TII->get(ARM::MOVsi), NewVReg3)
-                     .addReg(NewVReg1)
-                     .addImm(ARM_AM::getSORegOpc(ARM_AM::lsl, 2))
-                     .add(predOps(ARMCC::AL)));
+    BuildMI(DispContBB, dl, TII->get(ARM::MOVsi), NewVReg3)
+        .addReg(NewVReg1)
+        .addImm(ARM_AM::getSORegOpc(ARM_AM::lsl, 2))
+        .add(predOps(ARMCC::AL))
+        .add(condCodeOp());
     unsigned NewVReg4 = MRI->createVirtualRegister(TRC);
     BuildMI(DispContBB, dl, TII->get(ARM::LEApcrelJT), NewVReg4)
         .addJumpTableIndex(MJTI)
@@ -8410,11 +8263,11 @@ static void emitPostLd(MachineBasicBlock *BB, MachineBasicBlock::iterator Pos,
         .addReg(AddrIn)
         .addImm(0)
         .add(predOps(ARMCC::AL));
-    MachineInstrBuilder MIB =
-        BuildMI(*BB, Pos, dl, TII->get(ARM::tADDi8), AddrOut);
-    MIB = AddDefaultT1CC(MIB);
-    MIB.addReg(AddrIn).addImm(LdSize);
-    MIB.add(predOps(ARMCC::AL));
+    BuildMI(*BB, Pos, dl, TII->get(ARM::tADDi8), AddrOut)
+        .add(t1CondCodeOp())
+        .addReg(AddrIn)
+        .addImm(LdSize)
+        .add(predOps(ARMCC::AL));
   } else if (IsThumb2) {
     BuildMI(*BB, Pos, dl, TII->get(LdOpc), Data)
         .addReg(AddrOut, RegState::Define)
@@ -8452,11 +8305,11 @@ static void emitPostSt(MachineBasicBlock *BB, MachineBasicBlock::iterator Pos,
         .addReg(AddrIn)
         .addImm(0)
         .add(predOps(ARMCC::AL));
-    MachineInstrBuilder MIB =
-        BuildMI(*BB, Pos, dl, TII->get(ARM::tADDi8), AddrOut);
-    MIB = AddDefaultT1CC(MIB);
-    MIB.addReg(AddrIn).addImm(StSize);
-    MIB.add(predOps(ARMCC::AL));
+    BuildMI(*BB, Pos, dl, TII->get(ARM::tADDi8), AddrOut)
+        .add(t1CondCodeOp())
+        .addReg(AddrIn)
+        .addImm(StSize)
+        .add(predOps(ARMCC::AL));
   } else if (IsThumb2) {
     BuildMI(*BB, Pos, dl, TII->get(StOpc), AddrOut)
         .addReg(Data)
@@ -8667,16 +8520,19 @@ ARMTargetLowering::EmitStructByval(MachineInstr &MI,
 
   // Decrement loop variable by UnitSize.
   if (IsThumb1) {
-    MachineInstrBuilder MIB =
-        BuildMI(*BB, BB->end(), dl, TII->get(ARM::tSUBi8), varLoop);
-    MIB = AddDefaultT1CC(MIB);
-    MIB.addReg(varPhi).addImm(UnitSize);
-    MIB.add(predOps(ARMCC::AL));
+    BuildMI(*BB, BB->end(), dl, TII->get(ARM::tSUBi8), varLoop)
+        .add(t1CondCodeOp())
+        .addReg(varPhi)
+        .addImm(UnitSize)
+        .add(predOps(ARMCC::AL));
   } else {
     MachineInstrBuilder MIB =
         BuildMI(*BB, BB->end(), dl,
                 TII->get(IsThumb2 ? ARM::t2SUBri : ARM::SUBri), varLoop);
-    AddDefaultCC(MIB.addReg(varPhi).addImm(UnitSize).add(predOps(ARMCC::AL)));
+    MIB.addReg(varPhi)
+        .addImm(UnitSize)
+        .add(predOps(ARMCC::AL))
+        .add(condCodeOp());
     MIB->getOperand(5).setReg(ARM::CPSR);
     MIB->getOperand(5).setIsDef(true);
   }
@@ -8770,11 +8626,12 @@ ARMTargetLowering::EmitLowered__chkstk(MachineInstr &MI,
   }
   }
 
-  AddDefaultCC(BuildMI(*MBB, MI, DL, TII.get(ARM::t2SUBrr), ARM::SP)
-                   .addReg(ARM::SP, RegState::Kill)
-                   .addReg(ARM::R4, RegState::Kill)
-                   .setMIFlags(MachineInstr::FrameSetup)
-                   .add(predOps(ARMCC::AL)));
+  BuildMI(*MBB, MI, DL, TII.get(ARM::t2SUBrr), ARM::SP)
+      .addReg(ARM::SP, RegState::Kill)
+      .addReg(ARM::R4, RegState::Kill)
+      .setMIFlags(MachineInstr::FrameSetup)
+      .add(predOps(ARMCC::AL))
+      .add(condCodeOp());
 
   MI.eraseFromParent();
   return MBB;
@@ -8827,11 +8684,11 @@ ARMTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   // Thumb1 post-indexed loads are really just single-register LDMs.
   case ARM::tLDR_postidx: {
     BuildMI(*BB, MI, dl, TII->get(ARM::tLDMIA_UPD))
-      .addOperand(MI.getOperand(1)) // Rn_wb
-      .addOperand(MI.getOperand(2)) // Rn
-      .addOperand(MI.getOperand(3)) // PredImm
-      .addOperand(MI.getOperand(4)) // PredReg
-      .addOperand(MI.getOperand(0)); // Rt
+        .add(MI.getOperand(1))  // Rn_wb
+        .add(MI.getOperand(2))  // Rn
+        .add(MI.getOperand(3))  // PredImm
+        .add(MI.getOperand(4))  // PredReg
+        .add(MI.getOperand(0)); // Rt
     MI.eraseFromParent();
     return BB;
   }
@@ -8862,12 +8719,12 @@ ARMTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
 
     MachineMemOperand *MMO = *MI.memoperands_begin();
     BuildMI(*BB, MI, dl, TII->get(NewOpc))
-        .addOperand(MI.getOperand(0)) // Rn_wb
-        .addOperand(MI.getOperand(1)) // Rt
-        .addOperand(MI.getOperand(2)) // Rn
-        .addImm(Offset)               // offset (skip GPR==zero_reg)
-        .addOperand(MI.getOperand(5)) // pred
-        .addOperand(MI.getOperand(6))
+        .add(MI.getOperand(0)) // Rn_wb
+        .add(MI.getOperand(1)) // Rt
+        .add(MI.getOperand(2)) // Rn
+        .addImm(Offset)        // offset (skip GPR==zero_reg)
+        .add(MI.getOperand(5)) // pred
+        .add(MI.getOperand(6))
         .addMemOperand(MMO);
     MI.eraseFromParent();
     return BB;
@@ -8884,7 +8741,7 @@ ARMTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     }
     MachineInstrBuilder MIB = BuildMI(*BB, MI, dl, TII->get(NewOpc));
     for (unsigned i = 0; i < MI.getNumOperands(); ++i)
-      MIB.addOperand(MI.getOperand(i));
+      MIB.add(MI.getOperand(i));
     MI.eraseFromParent();
     return BB;
   }

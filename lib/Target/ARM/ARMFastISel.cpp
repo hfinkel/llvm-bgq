@@ -261,12 +261,8 @@ ARMFastISel::AddOptionalDefs(const MachineInstrBuilder &MIB) {
   // Do we optionally set a predicate?  Preds is size > 0 iff the predicate
   // defines CPSR. All other OptionalDefines in ARM are the CCR register.
   bool CPSR = false;
-  if (DefinesOptionalPredicate(MI, &CPSR)) {
-    if (CPSR)
-      AddDefaultT1CC(MIB);
-    else
-      AddDefaultCC(MIB);
-  }
+  if (DefinesOptionalPredicate(MI, &CPSR))
+    MIB.add(CPSR ? t1CondCodeOp() : condCodeOp());
   return MIB;
 }
 
@@ -2691,7 +2687,7 @@ unsigned ARMFastISel::ARMEmitIntExt(MVT SrcVT, unsigned SrcReg, MVT DestVT,
         .addImm(ImmEnc)
         .add(predOps(ARMCC::AL));
     if (hasS)
-      AddDefaultCC(MIB);
+      MIB.add(condCodeOp());
     // Second instruction consumes the first's result.
     SrcReg = ResultReg;
   }

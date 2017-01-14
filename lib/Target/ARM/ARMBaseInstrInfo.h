@@ -410,23 +410,19 @@ static inline std::array<MachineOperand, 2> predOps(ARMCC::CondCodes Pred,
            MachineOperand::CreateReg(PredReg, 0)}};
 }
 
-// FIXME: Replace with something that returns a MachineOperand
-static inline
-const MachineInstrBuilder &AddDefaultCC(const MachineInstrBuilder &MIB) {
-  return MIB.addReg(0);
+/// Get the operand corresponding to the conditional code result. By default,
+/// this is 0 (no register).
+static inline MachineOperand condCodeOp(unsigned CCReg = 0) {
+  return MachineOperand::CreateReg(CCReg, 0);
 }
 
-// FIXME: Replace with something that returns a MachineOperand
-static inline
-const MachineInstrBuilder &AddDefaultT1CC(const MachineInstrBuilder &MIB,
-                                          bool isDead = false) {
-  return MIB.addReg(ARM::CPSR, getDefRegState(true) | getDeadRegState(isDead));
-}
-
-// FIXME: Replace with something that returns a MachineOperand
-static inline
-const MachineInstrBuilder &AddNoT1CC(const MachineInstrBuilder &MIB) {
-  return MIB.addReg(0);
+/// Get the operand corresponding to the conditional code result for Thumb1.
+/// This operand will always refer to CPSR and it will have the Define flag set.
+/// You can optionally set the Dead flag by means of \p isDead.
+static inline MachineOperand t1CondCodeOp(bool isDead = false) {
+  return MachineOperand::CreateReg(ARM::CPSR,
+                                   /*Define*/ true, /*Implicit*/ false,
+                                   /*Kill*/ false, isDead);
 }
 
 static inline
