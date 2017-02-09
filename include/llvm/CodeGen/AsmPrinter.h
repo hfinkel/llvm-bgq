@@ -23,6 +23,7 @@
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/SourceMgr.h"
 
 namespace llvm {
 class AsmPrinterHandler;
@@ -136,6 +137,19 @@ private:
   /// A vector of all debug/EH info emitters we should use. This vector
   /// maintains ownership of the emitters.
   SmallVector<HandlerInfo, 1> Handlers;
+
+public:
+  struct SrcMgrDiagInfo {
+    SourceMgr SrcMgr;
+    const MDNode *LocInfo;
+    LLVMContext::InlineAsmDiagHandlerTy DiagHandler;
+    void *DiagContext;
+  };
+
+private:
+  /// Structure for generating diagnostics for inline assembly. Only initialised
+  /// when necessary.
+  mutable std::unique_ptr<SrcMgrDiagInfo> DiagInfo;
 
   /// If the target supports dwarf debug info, this pointer is non-null.
   DwarfDebug *DD;
@@ -484,7 +498,7 @@ public:
   ///
   /// \p Value - The value to emit.
   /// \p Size - The size of the integer (in bytes) to emit.
-  virtual void EmitDebugValue(const MCExpr *Value, unsigned Size) const;
+  virtual void EmitDebugThreadLocal(const MCExpr *Value, unsigned Size) const;
 
   //===------------------------------------------------------------------===//
   // Dwarf Lowering Routines
