@@ -308,7 +308,7 @@ private:
 CallSiteInfo &VTableSlotInfo::findCallSiteInfo(CallSite CS) {
   std::vector<uint64_t> Args;
   auto *CI = dyn_cast<IntegerType>(CS.getType());
-  if (!CI || CI->getBitWidth() > 64)
+  if (!CI || CI->getBitWidth() > 64 || CS.arg_empty())
     return CSInfo;
   for (auto &&Arg : make_range(CS.arg_begin() + 1, CS.arg_end())) {
     auto *CI = dyn_cast<ConstantInt>(Arg);
