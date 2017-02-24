@@ -2005,19 +2005,35 @@ unsigned X86TargetLowering::getAddressSpace() const {
   return 256;
 }
 
-Value *X86TargetLowering::getIRStackGuard(IRBuilder<> &IRB) const {
-  // glibc has a special slot for the stack guard in tcbhead_t, use it instead
-  // of the usual global variable (see sysdeps/{i386,x86_64}/nptl/tls.h)
-  if (!Subtarget.isTargetGlibc())
-    return TargetLowering::getIRStackGuard(IRB);
+static bool hasStackGuardSlotTLS(const Triple &TargetTriple) {
+  return TargetTriple.isOSGlibc() || TargetTriple.isOSFuchsia() ||
+         (TargetTriple.isAndroid() && !TargetTriple.isAndroidVersionLT(17));
+}
 
-  // %fs:0x28, unless we're using a Kernel code model, in which case it's %gs:
-  // %gs:0x14 on i386
-  unsigned Offset = (Subtarget.is64Bit()) ? 0x28 : 0x14;
-  unsigned AddressSpace = getAddressSpace();
+static Constant* SegmentOffset(IRBuilder<> &IRB,
+                               unsigned Offset, unsigned AddressSpace) {
   return ConstantExpr::getIntToPtr(
       ConstantInt::get(Type::getInt32Ty(IRB.getContext()), Offset),
       Type::getInt8PtrTy(IRB.getContext())->getPointerTo(AddressSpace));
+}
+
+Value *X86TargetLowering::getIRStackGuard(IRBuilder<> &IRB) const {
+  // glibc, bionic, and Fuchsia have a special slot for the stack guard in
+  // tcbhead_t; use it instead of the usual global variable (see
+  // sysdeps/{i386,x86_64}/nptl/tls.h)
+  if (hasStackGuardSlotTLS(Subtarget.getTargetTriple())) {
+    if (Subtarget.isTargetFuchsia()) {
+      // <magenta/tls.h> defines MX_TLS_STACK_GUARD_OFFSET with this value.
+      return SegmentOffset(IRB, 0x10, 257);
+    } else {
+      // %fs:0x28, unless we're using a Kernel code model, in which case
+      // it's %gs:0x28.  gs:0x14 on i386.
+      unsigned Offset = (Subtarget.is64Bit()) ? 0x28 : 0x14;
+      return SegmentOffset(IRB, Offset, getAddressSpace());
+    }
+  }
+
+  return TargetLowering::getIRStackGuard(IRB);
 }
 
 void X86TargetLowering::insertSSPDeclarations(Module &M) const {
@@ -2036,8 +2052,8 @@ void X86TargetLowering::insertSSPDeclarations(Module &M) const {
     SecurityCheckCookie->addAttribute(1, Attribute::AttrKind::InReg);
     return;
   }
-  // glibc has a special slot for the stack guard.
-  if (Subtarget.isTargetGlibc())
+  // glibc, bionic, and Fuchsia have a special slot for the stack guard.
+  if (hasStackGuardSlotTLS(Subtarget.getTargetTriple()))
     return;
   TargetLowering::insertSSPDeclarations(M);
 }
@@ -2060,21 +2076,23 @@ Value *X86TargetLowering::getSafeStackPointerLocation(IRBuilder<> &IRB) const {
   if (Subtarget.getTargetTriple().isOSContiki())
     return getDefaultSafeStackPointerLocation(IRB, false);
 
-  if (!Subtarget.isTargetAndroid())
-    return TargetLowering::getSafeStackPointerLocation(IRB);
-
   // Android provides a fixed TLS slot for the SafeStack pointer. See the
   // definition of TLS_SLOT_SAFESTACK in
   // https://android.googlesource.com/platform/bionic/+/master/libc/private/bionic_tls.h
-  unsigned AddressSpace, Offset;
+  if (Subtarget.isTargetAndroid()) {
+    // %fs:0x48, unless we're using a Kernel code model, in which case it's %gs:
+    // %gs:0x24 on i386
+    unsigned Offset = (Subtarget.is64Bit()) ? 0x48 : 0x24;
+    return SegmentOffset(IRB, Offset, getAddressSpace());
+  }
 
-  // %fs:0x48, unless we're using a Kernel code model, in which case it's %gs:
-  // %gs:0x24 on i386
-  Offset = (Subtarget.is64Bit()) ? 0x48 : 0x24;
-  AddressSpace = getAddressSpace();
-  return ConstantExpr::getIntToPtr(
-      ConstantInt::get(Type::getInt32Ty(IRB.getContext()), Offset),
-      Type::getInt8PtrTy(IRB.getContext())->getPointerTo(AddressSpace));
+  // Fuchsia is similar.
+  if (Subtarget.isTargetFuchsia()) {
+    // <magenta/tls.h> defines MX_TLS_UNSAFE_SP_OFFSET with this value.
+    return SegmentOffset(IRB, 0x18, 257);
+  }
+
+  return TargetLowering::getSafeStackPointerLocation(IRB);
 }
 
 bool X86TargetLowering::isNoopAddrSpaceCast(unsigned SrcAS,
@@ -23918,9 +23936,11 @@ const char *X86TargetLowering::getTargetNodeName(unsigned Opcode) const {
   case X86ISD::FMAX:               return "X86ISD::FMAX";
   case X86ISD::FMAXS:              return "X86ISD::FMAXS";
   case X86ISD::FMAX_RND:           return "X86ISD::FMAX_RND";
+  case X86ISD::FMAXS_RND:          return "X86ISD::FMAX_RND";
   case X86ISD::FMIN:               return "X86ISD::FMIN";
   case X86ISD::FMINS:              return "X86ISD::FMINS";
   case X86ISD::FMIN_RND:           return "X86ISD::FMIN_RND";
+  case X86ISD::FMINS_RND:          return "X86ISD::FMINS_RND";
   case X86ISD::FMAXC:              return "X86ISD::FMAXC";
   case X86ISD::FMINC:              return "X86ISD::FMINC";
   case X86ISD::FRSQRT:             return "X86ISD::FRSQRT";
@@ -24113,9 +24133,13 @@ const char *X86TargetLowering::getTargetNodeName(unsigned Opcode) const {
   case X86ISD::RSQRT28:            return "X86ISD::RSQRT28";
   case X86ISD::RSQRT28S:           return "X86ISD::RSQRT28S";
   case X86ISD::FADD_RND:           return "X86ISD::FADD_RND";
+  case X86ISD::FADDS_RND:          return "X86ISD::FADDS_RND";
   case X86ISD::FSUB_RND:           return "X86ISD::FSUB_RND";
+  case X86ISD::FSUBS_RND:          return "X86ISD::FSUBS_RND";
   case X86ISD::FMUL_RND:           return "X86ISD::FMUL_RND";
+  case X86ISD::FMULS_RND:          return "X86ISD::FMULS_RND";
   case X86ISD::FDIV_RND:           return "X86ISD::FDIV_RND";
+  case X86ISD::FDIVS_RND:          return "X86ISD::FDIVS_RND";
   case X86ISD::FSQRT_RND:          return "X86ISD::FSQRT_RND";
   case X86ISD::FSQRTS_RND:         return "X86ISD::FSQRTS_RND";
   case X86ISD::FGETEXP_RND:        return "X86ISD::FGETEXP_RND";
