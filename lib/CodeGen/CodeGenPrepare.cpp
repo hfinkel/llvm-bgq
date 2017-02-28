@@ -514,7 +514,9 @@ bool CodeGenPrepare::splitIndirectCriticalEdges(Function &F) {
   for (BasicBlock *Target : Targets) {
     SmallVector<BasicBlock *, 16> OtherPreds;
     BasicBlock *IBRPred = findIBRPredecessor(Target, OtherPreds);
-    if (!IBRPred)
+    // If we did not found an indirectbr, or the indirectbr is the only
+    // incoming edge, this isn't the kind of edge we're looking for.
+    if (!IBRPred || OtherPreds.empty())
       continue;
 
     // Don't even think about ehpads/landingpads.

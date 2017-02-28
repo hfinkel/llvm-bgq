@@ -18,6 +18,9 @@ declare void @useptr([2 x i8*]*) local_unnamed_addr
 ; CHECK: @nophi.targets = constant [2 x i8*] [i8* blockaddress(@nophi, %bb0), i8* blockaddress(@nophi, %bb1)], align 16
 @nophi.targets = constant [2 x i8*] [i8* blockaddress(@nophi, %bb0), i8* blockaddress(@nophi, %bb1)], align 16
 
+; CHECK: @noncritical.targets = constant [2 x i8*] [i8* blockaddress(@noncritical, %bb0), i8* blockaddress(@noncritical, %bb1)], align 16
+@noncritical.targets = constant [2 x i8*] [i8* blockaddress(@noncritical, %bb0), i8* blockaddress(@noncritical, %bb1)], align 16
+
 ; Check that we break the critical edge when an jump table has only one use.
 define void @simple(i32* nocapture readonly %p) {
 ; CHECK-LABEL: @simple(
@@ -235,8 +238,7 @@ entry:
   ]
 
 bb0:
-  tail call void @use(i32 0)
-  br label %indirectgoto
+  tail call void @use(i32 0)  br label %indirectgoto
 
 bb1:
   tail call void @use(i32 1)
@@ -251,4 +253,42 @@ indirectgoto:
 
 exit:
   ret void
+}
+
+; Don't do anything if the edge isn't critical.
+define i32 @noncritical(i32 %k, i8* %p)
+; CHECK-LABEL: @noncritical(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    [[D:%.*]] = add i32 [[K:%.*]], 1
+; CHECK-NEXT:    indirectbr i8* [[P:%.*]], [label [[BB0:%.*]], label %bb1]
+; CHECK:       bb0:
+; CHECK-NEXT:    [[R0:%.*]] = sub i32 [[K]], [[D]]
+; CHECK-NEXT:    br label [[EXIT:%.*]]
+; CHECK:       bb1:
+; CHECK-NEXT:    [[R1:%.*]] = sub i32 [[D]], [[K]]
+; CHECK-NEXT:    br label [[EXIT]]
+; CHECK:       exit:
+; CHECK-NEXT:    [[V:%.*]] = phi i32 [ [[R0]], [[BB0]] ], [ [[R1]], [[BB1:%.*]] ]
+; CHECK-NEXT:    ret i32 0
+;
+{
+entry:
+  %d = add i32 %k, 1
+  indirectbr i8* %p, [label %bb0, label %bb1]
+
+bb0:
+  %v00 = phi i32 [%k, %entry]
+  %v01 = phi i32 [%d, %entry]
+  %r0 = sub i32 %v00, %v01
+  br label %exit
+
+bb1:
+  %v10 = phi i32 [%d, %entry]
+  %v11 = phi i32 [%k, %entry]
+  %r1 = sub i32 %v10, %v11
+  br label %exit
+
+exit:
+  %v = phi i32 [%r0, %bb0], [%r1, %bb1]
+  ret i32 0
 }
