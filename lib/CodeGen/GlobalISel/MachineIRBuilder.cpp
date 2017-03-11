@@ -137,8 +137,12 @@ MachineInstrBuilder MachineIRBuilder::buildConstDbgValue(const Constant &C,
       MIB.addCImm(CI);
     else
       MIB.addImm(CI->getZExtValue());
-  } else
-    MIB.addFPImm(&cast<ConstantFP>(C));
+  } else if (auto *CFP = dyn_cast<ConstantFP>(&C)) {
+    MIB.addFPImm(CFP);
+  } else {
+    // Insert %noreg if we didn't find a usable constant and had to drop it.
+    MIB.addReg(0U);
+  }
 
   return MIB.addImm(Offset).addMetadata(Variable).addMetadata(Expr);
 }
@@ -564,9 +568,10 @@ MachineInstrBuilder MachineIRBuilder::buildSelect(unsigned Res, unsigned Tst,
   if (ResTy.isScalar() || ResTy.isPointer())
     assert(MRI->getType(Tst).isScalar() && "type mismatch");
   else
-    assert(MRI->getType(Tst).isVector() &&
-           MRI->getType(Tst).getNumElements() ==
-               MRI->getType(Op0).getNumElements() &&
+    assert((MRI->getType(Tst).isScalar() ||
+            (MRI->getType(Tst).isVector() &&
+             MRI->getType(Tst).getNumElements() ==
+                 MRI->getType(Op0).getNumElements())) &&
            "type mismatch");
 #endif
 
@@ -575,6 +580,46 @@ MachineInstrBuilder MachineIRBuilder::buildSelect(unsigned Res, unsigned Tst,
       .addUse(Tst)
       .addUse(Op0)
       .addUse(Op1);
+}
+
+MachineInstrBuilder MachineIRBuilder::buildInsertVectorElement(unsigned Res,
+                                                               unsigned Val,
+                                                               unsigned Elt,
+                                                               unsigned Idx) {
+#ifndef NDEBUG
+  LLT ResTy = MRI->getType(Res);
+  LLT ValTy = MRI->getType(Val);
+  LLT EltTy = MRI->getType(Elt);
+  LLT IdxTy = MRI->getType(Idx);
+  assert(ResTy.isVector() && ValTy.isVector() && "invalid operand type");
+  assert(EltTy.isScalar() && IdxTy.isScalar() && "invalid operand type");
+  assert(ResTy.getNumElements() == ValTy.getNumElements() && "type mismatch");
+  assert(ResTy.getElementType() == EltTy && "type mismatch");
+#endif
+
+  return buildInstr(TargetOpcode::G_INSERT_VECTOR_ELT)
+      .addDef(Res)
+      .addUse(Val)
+      .addUse(Elt)
+      .addUse(Idx);
+}
+
+MachineInstrBuilder MachineIRBuilder::buildExtractVectorElement(unsigned Res,
+                                                                unsigned Val,
+                                                                unsigned Idx) {
+#ifndef NDEBUG
+  LLT ResTy = MRI->getType(Res);
+  LLT ValTy = MRI->getType(Val);
+  LLT IdxTy = MRI->getType(Idx);
+  assert(ValTy.isVector() && "invalid operand type");
+  assert(ResTy.isScalar() && IdxTy.isScalar() && "invalid operand type");
+  assert(ValTy.getElementType() == ResTy && "type mismatch");
+#endif
+
+  return buildInstr(TargetOpcode::G_EXTRACT_VECTOR_ELT)
+      .addDef(Res)
+      .addUse(Val)
+      .addUse(Idx);
 }
 
 void MachineIRBuilder::validateTruncExt(unsigned Dst, unsigned Src,

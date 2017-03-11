@@ -183,8 +183,8 @@ static void insertDebugValues(BasicBlock *OrigHeader,
   // Map existing PHI nodes to their dbg.values.
   for (auto &I : *OrigHeader) {
     if (auto DbgII = dyn_cast<DbgInfoIntrinsic>(&I)) {
-      if (isa<PHINode>(DbgII->getVariableLocation()))
-        DbgValueMap.insert({DbgII->getVariableLocation(), DbgII});
+      if (auto *Loc = dyn_cast_or_null<PHINode>(DbgII->getVariableLocation()))
+        DbgValueMap.insert({Loc, DbgII});
     }
   }
 
@@ -196,7 +196,7 @@ static void insertDebugValues(BasicBlock *OrigHeader,
     for (auto VI : PHI->operand_values()) {
       auto V = DbgValueMap.find(VI);
       if (V != DbgValueMap.end()) {
-        auto *DbgII = dyn_cast<DbgInfoIntrinsic>(V->second);
+        auto *DbgII = cast<DbgInfoIntrinsic>(V->second);
         Instruction *NewDbgII = DbgII->clone();
         auto PhiMAV = MetadataAsValue::get(C, ValueAsMetadata::get(PHI));
         NewDbgII->setOperand(0, PhiMAV);

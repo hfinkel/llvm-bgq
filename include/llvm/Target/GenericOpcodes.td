@@ -316,6 +316,12 @@ def G_SMULH : Instruction {
 // Floating Point Unary Ops.
 //------------------------------------------------------------------------------
 
+def G_FNEG : Instruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins type0:$src);
+  let hasSideEffects = 0;
+}
+
 def G_FPEXT : Instruction {
   let OutOperandList = (outs type0:$dst);
   let InOperandList = (ins type1:$src);
@@ -511,6 +517,24 @@ def G_BRINDIRECT : Instruction {
   let hasSideEffects = 0;
   let isBranch = 1;
   let isTerminator = 1;
+}
+
+//------------------------------------------------------------------------------
+// Vector ops
+//------------------------------------------------------------------------------
+
+// Generic insertelement.
+def G_INSERT_VECTOR_ELT : Instruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins type0:$src, type1:$elt, type2:$idx);
+  let hasSideEffects = 0;
+}
+
+// Generic extractelement.
+def G_EXTRACT_VECTOR_ELT : Instruction {
+  let OutOperandList = (outs type0:$dst);
+  let InOperandList = (ins type1:$src, type2:$idx);
+  let hasSideEffects = 0;
 }
 
 // TODO: Add the other generic opcodes.

@@ -1021,7 +1021,6 @@ TEST(APIntTest, fromString) {
   EXPECT_EQ(APInt(32, uint64_t(-3LL)), APInt(32,  "-11", 2));
   EXPECT_EQ(APInt(32, uint64_t(-4LL)), APInt(32, "-100", 2));
 
-
   EXPECT_EQ(APInt(32,  0), APInt(32,  "0",  8));
   EXPECT_EQ(APInt(32,  1), APInt(32,  "1",  8));
   EXPECT_EQ(APInt(32,  7), APInt(32,  "7",  8));
@@ -1043,7 +1042,6 @@ TEST(APIntTest, fromString) {
   EXPECT_EQ(APInt(32, uint64_t(-15LL)), APInt(32,  "-17", 8));
   EXPECT_EQ(APInt(32, uint64_t(-16LL)), APInt(32,  "-20", 8));
 
-
   EXPECT_EQ(APInt(32,  0), APInt(32,  "0", 10));
   EXPECT_EQ(APInt(32,  1), APInt(32,  "1", 10));
   EXPECT_EQ(APInt(32,  9), APInt(32,  "9", 10));
@@ -1057,7 +1055,6 @@ TEST(APIntTest, fromString) {
   EXPECT_EQ(APInt(32, uint64_t(-10LL)), APInt(32, "-10", 10));
   EXPECT_EQ(APInt(32, uint64_t(-19LL)), APInt(32, "-19", 10));
   EXPECT_EQ(APInt(32, uint64_t(-20LL)), APInt(32, "-20", 10));
-
 
   EXPECT_EQ(APInt(32,  0), APInt(32,  "0", 16));
   EXPECT_EQ(APInt(32,  1), APInt(32,  "1", 16));
@@ -1079,7 +1076,7 @@ TEST(APIntTest, fromString) {
   EXPECT_EQ(APInt(32, 36), APInt(32, "10", 36));
   EXPECT_EQ(APInt(32, 71), APInt(32, "1Z", 36));
   EXPECT_EQ(APInt(32, 72), APInt(32, "20", 36));
-  
+
   EXPECT_EQ(APInt(32,  uint64_t(-0LL)), APInt(32,  "-0", 36));
   EXPECT_EQ(APInt(32,  uint64_t(-1LL)), APInt(32,  "-1", 36));
   EXPECT_EQ(APInt(32, uint64_t(-35LL)), APInt(32,  "-Z", 36));
@@ -1648,6 +1645,59 @@ TEST(APIntTest, reverseBits) {
       EXPECT_EQ(X, Y.reverseBits());
     }
   }
+}
+
+TEST(APIntTest, insertBits) {
+  APInt iSrc(31, 0x00123456);
+
+  // Direct copy.
+  APInt i31(31, 0x76543210ull);
+  i31.insertBits(iSrc, 0);
+  EXPECT_EQ(static_cast<int64_t>(0x00123456ull), i31.getSExtValue());
+
+  // Single word src/dst insertion.
+  APInt i63(63, 0x01234567FFFFFFFFull);
+  i63.insertBits(iSrc, 4);
+  EXPECT_EQ(static_cast<int64_t>(0x012345600123456Full), i63.getSExtValue());
+
+  // Insert single word src into one word of dst.
+  APInt i120(120, UINT64_MAX, true);
+  i120.insertBits(iSrc, 8);
+  EXPECT_EQ(static_cast<int64_t>(0xFFFFFF80123456FFull), i120.getSExtValue());
+
+  // Insert single word src into two words of dst.
+  APInt i127(127, UINT64_MAX, true);
+  i127.insertBits(iSrc, 48);
+  EXPECT_EQ(i127.extractBits(64, 0).getZExtValue(), 0x3456FFFFFFFFFFFFull);
+  EXPECT_EQ(i127.extractBits(63, 64).getZExtValue(), 0x7FFFFFFFFFFF8012ull);
+
+  // Insert on word boundaries.
+  APInt i128(128, 0);
+  i128.insertBits(APInt(64, UINT64_MAX, true), 0);
+  i128.insertBits(APInt(64, UINT64_MAX, true), 64);
+  EXPECT_EQ(-1, i128.getSExtValue());
+
+  APInt i256(256, UINT64_MAX, true);
+  i256.insertBits(APInt(65, 0), 0);
+  i256.insertBits(APInt(69, 0), 64);
+  i256.insertBits(APInt(128, 0), 128);
+  EXPECT_EQ(0u, i256.getSExtValue());
+
+  APInt i257(257, 0);
+  i257.insertBits(APInt(96, UINT64_MAX, true), 64);
+  EXPECT_EQ(i257.extractBits(64, 0).getZExtValue(), 0x0000000000000000ull);
+  EXPECT_EQ(i257.extractBits(64, 64).getZExtValue(), 0xFFFFFFFFFFFFFFFFull);
+  EXPECT_EQ(i257.extractBits(64, 128).getZExtValue(), 0x00000000FFFFFFFFull);
+  EXPECT_EQ(i257.extractBits(65, 192).getZExtValue(), 0x0000000000000000ull);
+
+  // General insertion.
+  APInt i260(260, UINT64_MAX, true);
+  i260.insertBits(APInt(129, 1ull << 48), 15);
+  EXPECT_EQ(i260.extractBits(64, 0).getZExtValue(), 0x8000000000007FFFull);
+  EXPECT_EQ(i260.extractBits(64, 64).getZExtValue(), 0x0000000000000000ull);
+  EXPECT_EQ(i260.extractBits(64, 128).getZExtValue(), 0xFFFFFFFFFFFF0000ull);
+  EXPECT_EQ(i260.extractBits(64, 192).getZExtValue(), 0xFFFFFFFFFFFFFFFFull);
+  EXPECT_EQ(i260.extractBits(4, 256).getZExtValue(), 0x000000000000000Full);
 }
 
 TEST(APIntTest, extractBits) {
