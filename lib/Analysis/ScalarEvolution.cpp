@@ -4007,9 +4007,9 @@ static Optional<BinaryOp> MatchBinaryOp(Value *V, DominatorTree &DT) {
 
   case Instruction::Xor:
     if (auto *RHSC = dyn_cast<ConstantInt>(Op->getOperand(1)))
-      // If the RHS of the xor is a signbit, then this is just an add.
-      // Instcombine turns add of signbit into xor as a strength reduction step.
-      if (RHSC->getValue().isSignBit())
+      // If the RHS of the xor is a signmask, then this is just an add.
+      // Instcombine turns add of signmask into xor as a strength reduction step.
+      if (RHSC->getValue().isSignMask())
         return BinaryOp(Instruction::Add, Op->getOperand(0), Op->getOperand(1));
     return BinaryOp(Op);
 
@@ -5328,12 +5328,28 @@ const SCEV *ScalarEvolution::createSCEV(Value *V) {
       break;
 
     case Instruction::Or:
-      // Use ValueTracking to check whether this is actually an add.
-      if (haveNoCommonBitsSet(BO->LHS, BO->RHS, getDataLayout(), &AC,
-                              nullptr, &DT)) {
-        // There aren't any common bits set, so the add can't wrap.
-        auto Flags = SCEV::NoWrapFlags(SCEV::FlagNUW | SCEV::FlagNSW);
-        return getAddExpr(getSCEV(BO->LHS), getSCEV(BO->RHS), Flags);
+      // If the RHS of the Or is a constant, we may have something like:
+      // X*4+1 which got turned into X*4|1.  Handle this as an Add so loop
+      // optimizations will transparently handle this case.
+      //
+      // In order for this transformation to be safe, the LHS must be of the
+      // form X*(2^n) and the Or constant must be less than 2^n.
+      if (ConstantInt *CI = dyn_cast<ConstantInt>(BO->RHS)) {
+        const SCEV *LHS = getSCEV(BO->LHS);
+        const APInt &CIVal = CI->getValue();
+        if (GetMinTrailingZeros(LHS) >=
+            (CIVal.getBitWidth() - CIVal.countLeadingZeros())) {
+          // Build a plain add SCEV.
+          const SCEV *S = getAddExpr(LHS, getSCEV(CI));
+          // If the LHS of the add was an addrec and it has no-wrap flags,
+          // transfer the no-wrap flags, since an or won't introduce a wrap.
+          if (const SCEVAddRecExpr *NewAR = dyn_cast<SCEVAddRecExpr>(S)) {
+            const SCEVAddRecExpr *OldAR = cast<SCEVAddRecExpr>(LHS);
+            const_cast<SCEVAddRecExpr *>(NewAR)->setNoWrapFlags(
+                OldAR->getNoWrapFlags());
+          }
+          return S;
+        }
       }
       break;
 
@@ -5369,7 +5385,7 @@ const SCEV *ScalarEvolution::createSCEV(Value *V) {
                 // using an add, which is equivalent, and re-apply the zext.
                 APInt Trunc = CI->getValue().trunc(Z0TySize);
                 if (Trunc.zext(getTypeSizeInBits(UTy)) == CI->getValue() &&
-                    Trunc.isSignBit())
+                    Trunc.isSignMask())
                   return getZeroExtendExpr(getAddExpr(Z0, getConstant(Trunc)),
                                            UTy);
               }
