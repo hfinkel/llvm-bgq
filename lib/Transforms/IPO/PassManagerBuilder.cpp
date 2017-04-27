@@ -137,8 +137,8 @@ static cl::opt<int> PreInlineThreshold(
              "(default = 75)"));
 
 static cl::opt<bool> EnableGVNHoist(
-    "enable-gvn-hoist", cl::init(true), cl::Hidden,
-    cl::desc("Enable the GVN hoisting pass (default = on)"));
+    "enable-gvn-hoist", cl::init(false), cl::Hidden,
+    cl::desc("Enable the GVN hoisting pass (default = off)"));
 
 static cl::opt<bool>
     DisableLibCallsShrinkWrap("disable-libcalls-shrinkwrap", cl::init(false),
@@ -680,6 +680,11 @@ void PassManagerBuilder::populateModulePassManager(
   MPM.add(createLoopSinkPass());
   // Get rid of LCSSA nodes.
   MPM.add(createInstructionSimplifierPass());
+
+  // LoopSink (and other loop passes since the last simplifyCFG) might have
+  // resulted in single-entry-single-exit or empty blocks. Clean up the CFG.
+  MPM.add(createCFGSimplificationPass());
+
   addExtensionsToPM(EP_OptimizerLast, MPM);
 }
 
