@@ -16,20 +16,23 @@
 #include "llvm/DebugInfo/CodeView/CVTypeDumper.h"
 #include "llvm/DebugInfo/CodeView/CVTypeVisitor.h"
 #include "llvm/DebugInfo/CodeView/EnumTables.h"
-#include "llvm/DebugInfo/CodeView/ModuleSubstreamVisitor.h"
+#include "llvm/DebugInfo/CodeView/ModuleDebugFileChecksumFragment.h"
+#include "llvm/DebugInfo/CodeView/ModuleDebugFragmentVisitor.h"
+#include "llvm/DebugInfo/CodeView/ModuleDebugLineFragment.h"
+#include "llvm/DebugInfo/CodeView/ModuleDebugUnknownFragment.h"
 #include "llvm/DebugInfo/CodeView/SymbolDumper.h"
 #include "llvm/DebugInfo/CodeView/TypeDatabaseVisitor.h"
 #include "llvm/DebugInfo/CodeView/TypeDeserializer.h"
 #include "llvm/DebugInfo/CodeView/TypeDumpVisitor.h"
 #include "llvm/DebugInfo/CodeView/TypeVisitorCallbackPipeline.h"
 #include "llvm/DebugInfo/MSF/MappedBlockStream.h"
+#include "llvm/DebugInfo/PDB/Native/DbiModuleDescriptor.h"
 #include "llvm/DebugInfo/PDB/Native/DbiStream.h"
 #include "llvm/DebugInfo/PDB/Native/EnumTables.h"
 #include "llvm/DebugInfo/PDB/Native/GlobalsStream.h"
 #include "llvm/DebugInfo/PDB/Native/ISectionContribVisitor.h"
 #include "llvm/DebugInfo/PDB/Native/InfoStream.h"
-#include "llvm/DebugInfo/PDB/Native/ModInfo.h"
-#include "llvm/DebugInfo/PDB/Native/ModStream.h"
+#include "llvm/DebugInfo/PDB/Native/ModuleDebugStream.h"
 #include "llvm/DebugInfo/PDB/Native/PDBFile.h"
 #include "llvm/DebugInfo/PDB/Native/PublicsStream.h"
 #include "llvm/DebugInfo/PDB/Native/RawError.h"
@@ -316,6 +319,27 @@ Error LLVMOutputStyle::dumpBlockRanges() {
   return Error::success();
 }
 
+static Error parseStreamSpec(StringRef Str, uint32_t &SI, uint32_t &Offset,
+                             uint32_t &Size) {
+  if (Str.consumeInteger(0, SI))
+    return make_error<RawError>(raw_error_code::invalid_format,
+                                "Invalid Stream Specification");
+  if (Str.consume_front(":")) {
+    if (Str.consumeInteger(0, Offset))
+      return make_error<RawError>(raw_error_code::invalid_format,
+                                  "Invalid Stream Specification");
+  }
+  if (Str.consume_front("@")) {
+    if (Str.consumeInteger(0, Size))
+      return make_error<RawError>(raw_error_code::invalid_format,
+                                  "Invalid Stream Specification");
+  }
+  if (!Str.empty())
+    return make_error<RawError>(raw_error_code::invalid_format,
+                                "Invalid Stream Specification");
+  return Error::success();
+}
+
 Error LLVMOutputStyle::dumpStreamBytes() {
   if (opts::raw::DumpStreamData.empty())
     return Error::success();
@@ -324,7 +348,15 @@ Error LLVMOutputStyle::dumpStreamBytes() {
     discoverStreamPurposes(File, StreamPurposes);
 
   DictScope D(P, "Stream Data");
-  for (uint32_t SI : opts::raw::DumpStreamData) {
+  for (auto &Str : opts::raw::DumpStreamData) {
+    uint32_t SI = 0;
+    uint32_t Begin = 0;
+    uint32_t Size = 0;
+    uint32_t End = 0;
+
+    if (auto EC = parseStreamSpec(Str, SI, Begin, Size))
+      return EC;
+
     if (SI >= File.getNumStreams())
       return make_error<RawError>(raw_error_code::no_stream);
 
@@ -333,6 +365,14 @@ Error LLVMOutputStyle::dumpStreamBytes() {
     if (!S)
       continue;
     DictScope DD(P, "Stream");
+    if (Size == 0)
+      End = S->getLength();
+    else {
+      End = Begin + Size;
+      if (End >= S->getLength())
+        return make_error<RawError>(raw_error_code::index_out_of_bounds,
+                                    "Stream is not long enough!");
+    }
 
     P.printNumber("Index", SI);
     P.printString("Type", StreamPurposes[SI]);
@@ -344,7 +384,9 @@ Error LLVMOutputStyle::dumpStreamBytes() {
     ArrayRef<uint8_t> StreamData;
     if (auto EC = R.readBytes(StreamData, S->getLength()))
       return EC;
-    P.printBinaryBlock("Data", StreamData);
+    Size = End - Begin;
+    StreamData = StreamData.slice(Begin, Size);
+    P.printBinaryBlock("Data", StreamData, Begin);
   }
   return Error::success();
 }
@@ -606,7 +648,7 @@ Error LLVMOutputStyle::dumpDbiStream() {
             File.getMsfLayout(), File.getMsfBuffer(),
             Modi.Info.getModuleStreamIndex());
 
-        ModStream ModS(Modi.Info, std::move(ModStreamData));
+        ModuleDebugStream ModS(Modi.Info, std::move(ModStreamData));
         if (auto EC = ModS.reload())
           return EC;
 
@@ -633,17 +675,15 @@ Error LLVMOutputStyle::dumpDbiStream() {
         }
         if (opts::raw::DumpLineInfo) {
           ListScope SS(P, "LineInfo");
-          bool HadError = false;
           // Define a locally scoped visitor to print the different
           // substream types types.
-          class RecordVisitor : public codeview::IModuleSubstreamVisitor {
+          class RecordVisitor : public codeview::ModuleDebugFragmentVisitor {
           public:
             RecordVisitor(ScopedPrinter &P, PDBFile &F) : P(P), F(F) {}
-            Error visitUnknown(ModuleSubstreamKind Kind,
-                               BinaryStreamRef Stream) override {
+            Error visitUnknown(ModuleDebugUnknownFragment &Fragment) override {
               DictScope DD(P, "Unknown");
               ArrayRef<uint8_t> Data;
-              BinaryStreamReader R(Stream);
+              BinaryStreamReader R(Fragment.getData());
               if (auto EC = R.readBytes(Data, R.bytesRemaining())) {
                 return make_error<RawError>(
                     raw_error_code::corrupt_file,
@@ -652,9 +692,8 @@ Error LLVMOutputStyle::dumpDbiStream() {
               P.printBinaryBlock("Data", Data);
               return Error::success();
             }
-            Error
-            visitFileChecksums(BinaryStreamRef Data,
-                               const FileChecksumArray &Checksums) override {
+            Error visitFileChecksums(
+                ModuleDebugFileChecksumFragment &Checksums) override {
               DictScope DD(P, "FileChecksums");
               for (const auto &C : Checksums) {
                 DictScope DDD(P, "Checksum");
@@ -669,9 +708,7 @@ Error LLVMOutputStyle::dumpDbiStream() {
               return Error::success();
             }
 
-            Error visitLines(BinaryStreamRef Data,
-                             const LineSubstreamHeader *Header,
-                             const LineInfoArray &Lines) override {
+            Error visitLines(ModuleDebugLineFragment &Lines) override {
               DictScope DD(P, "Lines");
               for (const auto &L : Lines) {
                 if (auto Result = getFileNameForOffset2(L.NameIndex))
@@ -720,8 +757,8 @@ Error LLVMOutputStyle::dumpDbiStream() {
           };
 
           RecordVisitor V(P, File);
-          for (const auto &L : ModS.lines(&HadError)) {
-            if (auto EC = codeview::visitModuleSubstream(L, V))
+          for (const auto &L : ModS.linesAndChecksums()) {
+            if (auto EC = codeview::visitModuleDebugFragment(L, V))
               return EC;
           }
         }
