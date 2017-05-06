@@ -1181,6 +1181,10 @@ bool TargetLibraryInfoImpl::isValidProtoForLibFunc(const FunctionType &FTy,
             FTy.getParamType(0)->isPointerTy() &&
             FTy.getParamType(1) == SizeTTy && FTy.getParamType(2) == SizeTTy);
 
+  case LibFunc_wcslen:
+    return (NumParams == 1 && FTy.getParamType(0)->isPointerTy() &&
+            FTy.getReturnType()->isIntegerTy());
+
   case LibFunc::NumLibFuncs:
     break;
   }
