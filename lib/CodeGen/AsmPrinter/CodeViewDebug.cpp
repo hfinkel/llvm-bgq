@@ -501,7 +501,7 @@ void CodeViewDebug::emitTypeInformation() {
       Error E = Reader.readArray(Types, Reader.getLength());
       if (!E) {
         TypeVisitorCallbacks C;
-        E = CVTypeVisitor(C).visitTypeStream(Types);
+        E = codeview::visitTypeStream(Types, C);
       }
       if (E) {
         logAllUnhandledErrors(std::move(E), errs(), "error: ");
@@ -767,7 +767,7 @@ void CodeViewDebug::emitDebugInfoForFunction(const Function *GV,
 
   // If our DISubprogram name is empty, use the mangled name.
   if (FuncName.empty())
-    FuncName = GlobalValue::getRealLinkageName(GV->getName());
+    FuncName = GlobalValue::dropLLVMManglingEscape(GV->getName());
 
   // Emit a symbol subsection, required by VS2012+ to find function boundaries.
   OS.AddComment("Symbol subsection for " + Twine(FuncName));
@@ -2202,7 +2202,7 @@ void CodeViewDebug::emitDebugInfoForGlobals() {
         if (GV->hasComdat()) {
           MCSymbol *GVSym = Asm->getSymbol(GV);
           OS.AddComment("Symbol subsection for " +
-                        Twine(GlobalValue::getRealLinkageName(GV->getName())));
+                        Twine(GlobalValue::dropLLVMManglingEscape(GV->getName())));
           switchToDebugSectionForSymbol(GVSym);
           EndLabel = beginCVSubsection(ModuleDebugFragmentKind::Symbols);
           // FIXME: emitDebugInfoForGlobal() doesn't handle DIExpressions.

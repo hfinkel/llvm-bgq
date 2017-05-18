@@ -67,6 +67,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Regex.h"
@@ -110,12 +111,22 @@ cl::list<std::string> InputFilenames(cl::Positional,
 
 cl::opt<bool> Compilands("compilands", cl::desc("Display compilands"),
                          cl::cat(TypeCategory), cl::sub(PrettySubcommand));
-cl::opt<bool> Symbols("symbols", cl::desc("Display symbols for each compiland"),
+cl::opt<bool> Symbols("module-syms",
+                      cl::desc("Display symbols for each compiland"),
                       cl::cat(TypeCategory), cl::sub(PrettySubcommand));
 cl::opt<bool> Globals("globals", cl::desc("Dump global symbols"),
                       cl::cat(TypeCategory), cl::sub(PrettySubcommand));
 cl::opt<bool> Externals("externals", cl::desc("Dump external symbols"),
                         cl::cat(TypeCategory), cl::sub(PrettySubcommand));
+cl::list<SymLevel> SymTypes(
+    "sym-types", cl::desc("Type of symbols to dump (default all)"),
+    cl::cat(TypeCategory), cl::sub(PrettySubcommand), cl::ZeroOrMore,
+    cl::values(
+        clEnumValN(SymLevel::Thunks, "thunks", "Display thunk symbols"),
+        clEnumValN(SymLevel::Data, "data", "Display data symbols"),
+        clEnumValN(SymLevel::Functions, "funcs", "Display function symbols"),
+        clEnumValN(SymLevel::All, "all", "Display all symbols (default)")));
+
 cl::opt<bool>
     Types("types",
           cl::desc("Display all types (implies -classes, -enums, -typedefs)"),
@@ -126,6 +137,16 @@ cl::opt<bool> Enums("enums", cl::desc("Display enum types"),
                     cl::cat(TypeCategory), cl::sub(PrettySubcommand));
 cl::opt<bool> Typedefs("typedefs", cl::desc("Display typedef types"),
                        cl::cat(TypeCategory), cl::sub(PrettySubcommand));
+cl::opt<SymbolSortMode> SymbolOrder(
+    "symbol-order", cl::desc("symbol sort order"),
+    cl::init(SymbolSortMode::None),
+    cl::values(clEnumValN(SymbolSortMode::None, "none",
+                          "Undefined / no particular sort order"),
+               clEnumValN(SymbolSortMode::Name, "name", "Sort symbols by name"),
+               clEnumValN(SymbolSortMode::Size, "size",
+                          "Sort symbols by size")),
+    cl::cat(TypeCategory), cl::sub(PrettySubcommand));
+
 cl::opt<ClassSortMode> ClassOrder(
     "class-order", cl::desc("Class sort order"), cl::init(ClassSortMode::None),
     cl::values(
@@ -345,9 +366,9 @@ cl::opt<std::string>
     YamlPdbOutputFile("pdb", cl::desc("the name of the PDB file to write"),
                       cl::sub(YamlToPdbSubcommand));
 
-cl::list<std::string> InputFilename(cl::Positional,
-                                    cl::desc("<input YAML file>"), cl::Required,
-                                    cl::sub(YamlToPdbSubcommand));
+cl::opt<std::string> InputFilename(cl::Positional,
+                                   cl::desc("<input YAML file>"), cl::Required,
+                                   cl::sub(YamlToPdbSubcommand));
 }
 
 namespace pdb2yaml {
@@ -620,6 +641,49 @@ static void diff(StringRef Path1, StringRef Path2) {
   ExitOnErr(O->dump());
 }
 
+bool opts::pretty::shouldDumpSymLevel(SymLevel Search) {
+  if (SymTypes.empty())
+    return true;
+  if (llvm::find(SymTypes, Search) != SymTypes.end())
+    return true;
+  if (llvm::find(SymTypes, SymLevel::All) != SymTypes.end())
+    return true;
+  return false;
+}
+
+uint32_t llvm::pdb::getTypeLength(const PDBSymbolData &Symbol) {
+  auto SymbolType = Symbol.getType();
+  const IPDBRawSymbol &RawType = SymbolType->getRawSymbol();
+
+  return RawType.getLength();
+}
+
+bool opts::pretty::compareFunctionSymbols(
+    const std::unique_ptr<PDBSymbolFunc> &F1,
+    const std::unique_ptr<PDBSymbolFunc> &F2) {
+  assert(opts::pretty::SymbolOrder != opts::pretty::SymbolSortMode::None);
+
+  if (opts::pretty::SymbolOrder == opts::pretty::SymbolSortMode::Name)
+    return F1->getName() < F2->getName();
+
+  // Note that we intentionally sort in descending order on length, since
+  // long functions are more interesting than short functions.
+  return F1->getLength() > F2->getLength();
+}
+
+bool opts::pretty::compareDataSymbols(
+    const std::unique_ptr<PDBSymbolData> &F1,
+    const std::unique_ptr<PDBSymbolData> &F2) {
+  assert(opts::pretty::SymbolOrder != opts::pretty::SymbolSortMode::None);
+
+  if (opts::pretty::SymbolOrder == opts::pretty::SymbolSortMode::Name)
+    return F1->getName() < F2->getName();
+
+  // Note that we intentionally sort in descending order on length, since
+  // large types are more interesting than short ones.
+  return getTypeLength(*F1) > getTypeLength(*F2);
+}
+
 static void dumpPretty(StringRef Path) {
   std::unique_ptr<IPDBSession> Session;
 
@@ -708,21 +772,42 @@ static void dumpPretty(StringRef Path) {
     Printer.NewLine();
     WithColor(Printer, PDB_ColorItem::SectionHeader).get() << "---GLOBALS---";
     Printer.Indent();
-    {
+    if (shouldDumpSymLevel(opts::pretty::SymLevel::Functions)) {
       FunctionDumper Dumper(Printer);
       auto Functions = GlobalScope->findAllChildren<PDBSymbolFunc>();
-      while (auto Function = Functions->getNext()) {
-        Printer.NewLine();
-        Dumper.start(*Function, FunctionDumper::PointerType::None);
+      if (opts::pretty::SymbolOrder == opts::pretty::SymbolSortMode::None) {
+        while (auto Function = Functions->getNext()) {
+          Printer.NewLine();
+          Dumper.start(*Function, FunctionDumper::PointerType::None);
+        }
+      } else {
+        std::vector<std::unique_ptr<PDBSymbolFunc>> Funcs;
+        while (auto Func = Functions->getNext())
+          Funcs.push_back(std::move(Func));
+        std::sort(Funcs.begin(), Funcs.end(),
+                  opts::pretty::compareFunctionSymbols);
+        for (const auto &Func : Funcs) {
+          Printer.NewLine();
+          Dumper.start(*Func, FunctionDumper::PointerType::None);
+        }
       }
     }
-    {
+    if (shouldDumpSymLevel(opts::pretty::SymLevel::Data)) {
       auto Vars = GlobalScope->findAllChildren<PDBSymbolData>();
       VariableDumper Dumper(Printer);
-      while (auto Var = Vars->getNext())
-        Dumper.start(*Var);
+      if (opts::pretty::SymbolOrder == opts::pretty::SymbolSortMode::None) {
+        while (auto Var = Vars->getNext())
+          Dumper.start(*Var);
+      } else {
+        std::vector<std::unique_ptr<PDBSymbolData>> Datas;
+        while (auto Var = Vars->getNext())
+          Datas.push_back(std::move(Var));
+        std::sort(Datas.begin(), Datas.end(), opts::pretty::compareDataSymbols);
+        for (const auto &Var : Datas)
+          Dumper.start(*Var);
+      }
     }
-    {
+    if (shouldDumpSymLevel(opts::pretty::SymLevel::Thunks)) {
       auto Thunks = GlobalScope->findAllChildren<PDBSymbolThunk>();
       CompilandDumper Dumper(Printer);
       while (auto Thunk = Thunks->getNext())
@@ -810,7 +895,12 @@ int main(int argc_, const char *argv_[]) {
   if (opts::PdbToYamlSubcommand) {
     pdb2Yaml(opts::pdb2yaml::InputFilename.front());
   } else if (opts::YamlToPdbSubcommand) {
-    yamlToPdb(opts::yaml2pdb::InputFilename.front());
+    if (opts::yaml2pdb::YamlPdbOutputFile.empty()) {
+      SmallString<16> OutputFilename(opts::yaml2pdb::InputFilename.getValue());
+      sys::path::replace_extension(OutputFilename, ".pdb");
+      opts::yaml2pdb::YamlPdbOutputFile = OutputFilename.str();
+    }
+    yamlToPdb(opts::yaml2pdb::InputFilename);
   } else if (opts::AnalyzeSubcommand) {
     dumpAnalysis(opts::analyze::InputFilename.front());
   } else if (opts::PrettySubcommand) {

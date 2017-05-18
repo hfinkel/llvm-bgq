@@ -1729,10 +1729,9 @@ SDValue DAGCombiner::visitTokenFactor(SDNode *N) {
       NumLeftToConsider--;
   }
 
-  SDValue Result;
-
   // If we've changed things around then replace token factor.
   if (Changed) {
+    SDValue Result;
     if (Ops.empty()) {
       // The entry token is the only possible outcome.
       Result = DAG.getEntryNode();
@@ -1749,13 +1748,9 @@ SDValue DAGCombiner::visitTokenFactor(SDNode *N) {
         Result = DAG.getNode(ISD::TokenFactor, SDLoc(N), MVT::Other, Ops);
       }
     }
-
-    // Add users to worklist, since we may introduce a lot of new
-    // chained token factors while removing memory deps.
-    return CombineTo(N, Result, true /*add to worklist*/);
+    return Result;
   }
-
-  return Result;
+  return SDValue();
 }
 
 /// MERGE_VALUES can always be eliminated.
@@ -5313,17 +5308,6 @@ SDValue DAGCombiner::visitSHL(SDNode *N) {
     }
   }
 
-  // If the target supports masking y in (shl, y),
-  // fold (shl x, (and y, ((1 << numbits(x)) - 1))) -> (shl x, y)
-  if (TLI.isOperationLegal(ISD::SHL, VT) &&
-      TLI.supportsModuloShift(ISD::SHL, VT) && N1->getOpcode() == ISD::AND) {
-    if (ConstantSDNode *Mask = isConstOrConstSplat(N1->getOperand(1))) {
-      if (Mask->getZExtValue() == OpSizeInBits - 1) {
-        return DAG.getNode(ISD::SHL, SDLoc(N), VT, N0, N1->getOperand(0));
-      }
-    }
-  }
-
   ConstantSDNode *N1C = isConstOrConstSplat(N1);
 
   // fold (shl c1, c2) -> c1<<c2
@@ -5522,17 +5506,6 @@ SDValue DAGCombiner::visitSRA(SDNode *N) {
   EVT VT = N0.getValueType();
   unsigned OpSizeInBits = VT.getScalarSizeInBits();
 
-  // If the target supports masking y in (sra, y),
-  // fold (sra x, (and y, ((1 << numbits(x)) - 1))) -> (sra x, y)
-  if (TLI.isOperationLegal(ISD::SRA, VT) &&
-      TLI.supportsModuloShift(ISD::SRA, VT) && N1->getOpcode() == ISD::AND) {
-    if (ConstantSDNode *Mask = isConstOrConstSplat(N1->getOperand(1))) {
-      if (Mask->getZExtValue() == OpSizeInBits - 1) {
-        return DAG.getNode(ISD::SRA, SDLoc(N), VT, N0, N1->getOperand(0));
-      }
-    }
-  }
-
   // Arithmetic shifting an all-sign-bit value is a no-op.
   // fold (sra 0, x) -> 0
   // fold (sra -1, x) -> -1
@@ -5686,17 +5659,6 @@ SDValue DAGCombiner::visitSRL(SDNode *N) {
   SDValue N1 = N->getOperand(1);
   EVT VT = N0.getValueType();
   unsigned OpSizeInBits = VT.getScalarSizeInBits();
-
-  // If the target supports masking y in (srl, y),
-  // fold (srl x, (and y, ((1 << numbits(x)) - 1))) -> (srl x, y)
-  if (TLI.isOperationLegal(ISD::SRL, VT) &&
-      TLI.supportsModuloShift(ISD::SRL, VT) && N1->getOpcode() == ISD::AND) {
-    if (ConstantSDNode *Mask = isConstOrConstSplat(N1->getOperand(1))) {
-      if (Mask->getZExtValue() == OpSizeInBits - 1) {
-        return DAG.getNode(ISD::SRL, SDLoc(N), VT, N0, N1->getOperand(0));
-      }
-    }
-  }
 
   // fold vector ops
   if (VT.isVector())
@@ -7361,14 +7323,8 @@ SDValue DAGCombiner::visitZERO_EXTEND(SDNode *N) {
                         N0.getValueSizeInBits(),
                         std::min(Op.getValueSizeInBits(),
                                  VT.getSizeInBits()));
-    if (TruncatedBits.isSubsetOf(Known.Zero)) {
-      if (VT.bitsGT(Op.getValueType()))
-        return DAG.getNode(ISD::ZERO_EXTEND, SDLoc(N), VT, Op);
-      if (VT.bitsLT(Op.getValueType()))
-        return DAG.getNode(ISD::TRUNCATE, SDLoc(N), VT, Op);
-
-      return Op;
-    }
+    if (TruncatedBits.isSubsetOf(Known.Zero))
+      return DAG.getZExtOrTrunc(Op, SDLoc(N), VT);
   }
 
   // fold (zext (truncate (load x))) -> (zext (smaller load x))
@@ -7415,14 +7371,8 @@ SDValue DAGCombiner::visitZERO_EXTEND(SDNode *N) {
     }
 
     if (!LegalOperations || TLI.isOperationLegal(ISD::AND, VT)) {
-      SDValue Op = N0.getOperand(0);
-      if (SrcVT.bitsLT(VT)) {
-        Op = DAG.getNode(ISD::ANY_EXTEND, SDLoc(N), VT, Op);
-        AddToWorklist(Op.getNode());
-      } else if (SrcVT.bitsGT(VT)) {
-        Op = DAG.getNode(ISD::TRUNCATE, SDLoc(N), VT, Op);
-        AddToWorklist(Op.getNode());
-      }
+      SDValue Op = DAG.getAnyExtOrTrunc(N0.getOperand(0), SDLoc(N), VT);
+      AddToWorklist(Op.getNode());
       return DAG.getZeroExtendInReg(Op, SDLoc(N), MinVT.getScalarType());
     }
   }
@@ -13137,14 +13087,28 @@ SDValue DAGCombiner::visitSTORE(SDNode *N) {
     }
   }
 
-  // If this is a store followed by a store with the same value to the same
-  // location, then the store is dead/noop.
   if (StoreSDNode *ST1 = dyn_cast<StoreSDNode>(Chain)) {
-    if (ST1->getBasePtr() == Ptr && ST->getMemoryVT() == ST1->getMemoryVT() &&
-        ST1->getValue() == Value && ST->isUnindexed() && !ST->isVolatile() &&
-        ST1->isUnindexed() && !ST1->isVolatile()) {
-      // The store is dead, remove it.
-      return Chain;
+    if (ST->isUnindexed() && !ST->isVolatile() && ST1->isUnindexed() &&
+        !ST1->isVolatile() && ST1->getBasePtr() == Ptr &&
+        ST->getMemoryVT() == ST1->getMemoryVT()) {
+      // If this is a store followed by a store with the same value to the same
+      // location, then the store is dead/noop.
+      if (ST1->getValue() == Value) {
+        // The store is dead, remove it.
+        return Chain;
+      }
+
+      // If this is a store who's preceeding store to the same location
+      // and no one other node is chained to that store we can effectively
+      // drop the store. Do not remove stores to undef as they may be used as
+      // data sinks.
+      if (OptLevel != CodeGenOpt::None && ST1->hasOneUse() &&
+          !ST1->getBasePtr().isUndef()) {
+        // ST1 is fully overwritten and can be elided. Combine with it's chain
+        // value.
+        CombineTo(ST1, ST1->getChain());
+        return SDValue();
+      }
     }
   }
 
