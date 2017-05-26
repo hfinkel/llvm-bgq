@@ -914,6 +914,8 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPMOVZXDQZrr,     X86::VPMOVZXDQZrm,       0 },
     { X86::VPMOVZXWDZrr,     X86::VPMOVZXWDZrm,       0 },
     { X86::VPMOVZXWQZrr,     X86::VPMOVZXWQZrm,       0 },
+    { X86::VPOPCNTDZrr,      X86::VPOPCNTDZrm,        0 },
+    { X86::VPOPCNTQZrr,      X86::VPOPCNTQZrm,        0 },
     { X86::VPSHUFDZri,       X86::VPSHUFDZmi,         0 },
     { X86::VPSHUFHWZri,      X86::VPSHUFHWZmi,        0 },
     { X86::VPSHUFLWZri,      X86::VPSHUFLWZmi,        0 },
@@ -2326,6 +2328,8 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPMOVZXDQZrrkz,    X86::VPMOVZXDQZrmkz,      0 },
     { X86::VPMOVZXWDZrrkz,    X86::VPMOVZXWDZrmkz,      0 },
     { X86::VPMOVZXWQZrrkz,    X86::VPMOVZXWQZrmkz,      0 },
+    { X86::VPOPCNTDZrrkz,     X86::VPOPCNTDZrmkz,       0 },
+    { X86::VPOPCNTQZrrkz,     X86::VPOPCNTQZrmkz,       0 },
     { X86::VPSHUFDZrikz,      X86::VPSHUFDZmikz,        0 },
     { X86::VPSHUFHWZrikz,     X86::VPSHUFHWZmikz,       0 },
     { X86::VPSHUFLWZrikz,     X86::VPSHUFLWZmikz,       0 },
@@ -2947,6 +2951,8 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPMOVZXDQZrrk,         X86::VPMOVZXDQZrmk,         0 },
     { X86::VPMOVZXWDZrrk,         X86::VPMOVZXWDZrmk,         0 },
     { X86::VPMOVZXWQZrrk,         X86::VPMOVZXWQZrmk,         0 },
+    { X86::VPOPCNTDZrrk,          X86::VPOPCNTDZrmk,          0 },
+    { X86::VPOPCNTQZrrk,          X86::VPOPCNTQZrmk,          0 },
     { X86::VPSHUFDZrik,           X86::VPSHUFDZmik,           0 },
     { X86::VPSHUFHWZrik,          X86::VPSHUFHWZmik,          0 },
     { X86::VPSHUFLWZrik,          X86::VPSHUFLWZmik,          0 },
@@ -8374,7 +8380,7 @@ static bool isNonFoldablePartialRegisterLoad(const MachineInstr &LoadMI,
   unsigned Opc = LoadMI.getOpcode();
   unsigned UserOpc = UserMI.getOpcode();
   const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
-  const TargetRegisterClass *RC = 
+  const TargetRegisterClass *RC =
       MF.getRegInfo().getRegClass(LoadMI.getOperand(0).getReg());
   unsigned RegSize = TRI.getRegSizeInBits(*RC);
 
@@ -10473,7 +10479,7 @@ X86InstrInfo::getOutliningType(MachineInstr &MI) const {
   // catch it.
   if (MI.modifiesRegister(X86::RSP, &RI) || MI.readsRegister(X86::RSP, &RI) ||
       MI.getDesc().hasImplicitUseOfPhysReg(X86::RSP) ||
-      MI.getDesc().hasImplicitDefOfPhysReg(X86::RSP)) 
+      MI.getDesc().hasImplicitDefOfPhysReg(X86::RSP))
     return MachineOutlinerInstrType::Illegal;
 
   // Outlined calls change the instruction pointer, so don't read from it.

@@ -1,4 +1,13 @@
+; REQUIRES: x86
 ; RUN: opt -loop-reduce -S < %s | FileCheck %s
+
+; Strength reduction analysis here relies on IV Users analysis, that
+; only finds users among instructions with types that are treated as
+; legal by the data layout. When running this test on pure non-x86
+; configs (for example, ARM 64), it gets confused with the target
+; triple and uses a default data layout instead. This default layout
+; does not have any legal types (even i32), so the transformation
+; does not happen.
 
 target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-s0:64:64-f80:128:128-n8:16:32:64-S128"
 target triple = "x86_64-apple-macosx"

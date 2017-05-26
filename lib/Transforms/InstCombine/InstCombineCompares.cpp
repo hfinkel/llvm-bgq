@@ -1478,8 +1478,7 @@ Instruction *InstCombiner::foldICmpTruncConstant(ICmpInst &Cmp,
     // of the high bits truncated out of x are known.
     unsigned DstBits = Trunc->getType()->getScalarSizeInBits(),
              SrcBits = X->getType()->getScalarSizeInBits();
-    KnownBits Known(SrcBits);
-    computeKnownBits(X, Known, 0, &Cmp);
+    KnownBits Known = computeKnownBits(X, 0, &Cmp);
 
     // If all the high bits are known, we can do this xform.
     if ((Known.Zero | Known.One).countLeadingOnes() >= SrcBits - DstBits) {
@@ -3053,26 +3052,29 @@ Instruction *InstCombiner::foldICmpBinOp(ICmpInst &I) {
       }
       break;
     }
-    case Instruction::Mul:
+    case Instruction::Mul: {
       if (!I.isEquality())
         break;
 
-      if (ConstantInt *CI = dyn_cast<ConstantInt>(BO0->getOperand(1))) {
-        // a * Cst icmp eq/ne b * Cst --> a & Mask icmp b & Mask
-        // Mask = -1 >> count-trailing-zeros(Cst).
-        if (!CI->isZero() && !CI->isOne()) {
-          const APInt &AP = CI->getValue();
-          ConstantInt *Mask = ConstantInt::get(
-              I.getContext(),
-              APInt::getLowBitsSet(AP.getBitWidth(),
-                                   AP.getBitWidth() - AP.countTrailingZeros()));
+      const APInt *C;
+      if (match(BO0->getOperand(1), m_APInt(C)) && *C != 0 && *C != 1) {
+        // icmp eq/ne (X * C), (Y * C) --> icmp (X & Mask), (Y & Mask)
+        // Mask = -1 >> count-trailing-zeros(C).
+        if (unsigned TZs = C->countTrailingZeros()) {
+          Constant *Mask = ConstantInt::get(
+              BO0->getType(),
+              APInt::getLowBitsSet(C->getBitWidth(), C->getBitWidth() - TZs));
           Value *And1 = Builder->CreateAnd(BO0->getOperand(0), Mask);
           Value *And2 = Builder->CreateAnd(BO1->getOperand(0), Mask);
           return new ICmpInst(Pred, And1, And2);
         }
+        // If there are no trailing zeros in the multiplier, just eliminate
+        // the multiplies (no masking is needed):
+        // icmp eq/ne (X * C), (Y * C) --> icmp eq/ne X, Y
+        return new ICmpInst(Pred, BO0->getOperand(0), BO1->getOperand(0));
       }
       break;
-
+    }
     case Instruction::UDiv:
     case Instruction::LShr:
       if (I.isSigned() || !BO0->isExact() || !BO1->isExact())
@@ -4501,7 +4503,7 @@ Instruction *InstCombiner::visitICmpInst(ICmpInst &I) {
     // if A is a power of 2.
     if (match(Op0, m_And(m_Value(A), m_Not(m_Value(B)))) &&
         match(Op1, m_Zero()) &&
-        isKnownToBeAPowerOfTwo(A, DL, false, 0, &AC, &I, &DT) && I.isEquality())
+        isKnownToBeAPowerOfTwo(A, false, 0, &I) && I.isEquality())
       return new ICmpInst(I.getInversePredicate(),
                           Builder->CreateAnd(A, B),
                           Op1);
