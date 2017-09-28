@@ -79,24 +79,6 @@ define void @odd_vector(<7 x i32>* %addr) {
   ret void
 }
 
-  ; RegBankSelect crashed when given invalid mappings, and AArch64's
-  ; implementation produce valid-but-nonsense mappings for G_SEQUENCE.
-; FALLBACK-WITH-REPORT-ERR: remark: <unknown>:0:0: unable to map instruction
-; FALLBACK-WITH-REPORT-ERR: warning: Instruction selection used fallback path for sequence_mapping
-; FALLBACK-WITH-REPORT-OUT-LABEL: sequence_mapping:
-define void @sequence_mapping([2 x i64] %in) {
-  ret void
-}
-
-  ; Legalizer was asserting when it enountered an unexpected default action.
-; FALLBACK-WITH-REPORT-ERR: remark: <unknown>:0:0: unable to map instruction
-; FALLBACK-WITH-REPORT-ERR: warning: Instruction selection used fallback path for legal_default
-; FALLBACK-WITH-REPORT-LABEL: legal_default:
-define void @legal_default([8 x i8] %in) {
-  insertvalue { [4 x i8], [8 x i8], [4 x i8] } undef, [8 x i8] %in, 1
-  ret void
-}
-
   ; AArch64 was asserting instead of returning an invalid mapping for unknown
   ; sizes.
 ; FALLBACK-WITH-REPORT-ERR: remark: <unknown>:0:0: unable to translate instruction: ret: '  ret i128 undef' (in function: sequence_sizes)
@@ -158,15 +140,30 @@ define fp128 @test_quad_dump() {
 ; FALLBACK-WITH-REPORT-ERR: remark: <unknown>:0:0: unable to legalize instruction: %vreg0<def>(p0) = G_EXTRACT_VECTOR_ELT %vreg1, %vreg2; (in function: vector_of_pointers_extractelement)
 ; FALLBACK-WITH-REPORT-ERR: warning: Instruction selection used fallback path for vector_of_pointers_extractelement
 ; FALLBACK-WITH-REPORT-OUT-LABEL: vector_of_pointers_extractelement:
+@var = global <2 x i16*> zeroinitializer
 define void @vector_of_pointers_extractelement() {
-  %dummy = extractelement <2 x i16*> undef, i32 0
+  br label %end
+
+block:
+  %dummy = extractelement <2 x i16*> %vec, i32 0
   ret void
+
+end:
+  %vec = load <2 x i16*>, <2 x i16*>* undef
+  br label %block
 }
 
 ; FALLBACK-WITH-REPORT-ERR: remark: <unknown>:0:0: unable to legalize instruction: %vreg0<def>(<2 x p0>) = G_INSERT_VECTOR_ELT %vreg1, %vreg2, %vreg3; (in function: vector_of_pointers_insertelement
 ; FALLBACK-WITH-REPORT-ERR: warning: Instruction selection used fallback path for vector_of_pointers_insertelement
 ; FALLBACK-WITH-REPORT-OUT-LABEL: vector_of_pointers_insertelement:
 define void @vector_of_pointers_insertelement() {
-  %dummy = insertelement <2 x i16*> undef, i16* null, i32 0
+  br label %end
+
+block:
+  %dummy = insertelement <2 x i16*> %vec, i16* null, i32 0
   ret void
+
+end:
+  %vec = load <2 x i16*>, <2 x i16*>* undef
+  br label %block
 }

@@ -17,25 +17,25 @@
 //
 
 #include "AMDGPUAsmPrinter.h"
-#include "AMDGPUTargetMachine.h"
-#include "MCTargetDesc/AMDGPUTargetStreamer.h"
-#include "InstPrinter/AMDGPUInstPrinter.h"
-#include "Utils/AMDGPUBaseInfo.h"
 #include "AMDGPU.h"
 #include "AMDGPUSubtarget.h"
+#include "AMDGPUTargetMachine.h"
+#include "InstPrinter/AMDGPUInstPrinter.h"
+#include "MCTargetDesc/AMDGPUTargetStreamer.h"
 #include "R600Defines.h"
 #include "R600MachineFunctionInfo.h"
 #include "R600RegisterInfo.h"
 #include "SIDefines.h"
-#include "SIMachineFunctionInfo.h"
 #include "SIInstrInfo.h"
+#include "SIMachineFunctionInfo.h"
 #include "SIRegisterInfo.h"
+#include "Utils/AMDGPUBaseInfo.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCStreamer.h"
-#include "llvm/Support/ELF.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
@@ -268,19 +268,10 @@ bool AMDGPUAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
                                  CurrentProgramInfo.ScratchSize,
                                  getFunctionCodeSize(MF));
 
-      OutStreamer->emitRawComment(" codeLenInByte = " +
-                                  Twine(getFunctionCodeSize(MF)), false);
-      OutStreamer->emitRawComment(
-        " NumSgprs: " + Twine(CurrentProgramInfo.NumSGPR), false);
-      OutStreamer->emitRawComment(
-        " NumVgprs: " + Twine(CurrentProgramInfo.NumVGPR), false);
-
       OutStreamer->emitRawComment(
         " FloatMode: " + Twine(CurrentProgramInfo.FloatMode), false);
       OutStreamer->emitRawComment(
         " IeeeMode: " + Twine(CurrentProgramInfo.IEEEMode), false);
-      OutStreamer->emitRawComment(
-        " ScratchSize: " + Twine(CurrentProgramInfo.ScratchSize), false);
       OutStreamer->emitRawComment(
         " LDSByteSize: " + Twine(CurrentProgramInfo.LDSSize) +
         " bytes/workgroup (compile time only)", false);
@@ -503,13 +494,14 @@ AMDGPUAsmPrinter::SIFunctionResourceInfo AMDGPUAsmPrinter::analyzeResourceUsage(
   Info.HasDynamicallySizedStack = FrameInfo.hasVarSizedObjects();
   Info.PrivateSegmentSize = FrameInfo.getStackSize();
 
-  if (!FrameInfo.hasCalls()) {
-    Info.UsesVCC = MRI.isPhysRegUsed(AMDGPU::VCC_LO) ||
-                   MRI.isPhysRegUsed(AMDGPU::VCC_HI);
 
-    // If there are no calls, MachineRegisterInfo can tell us the used register
-    // count easily.
+  Info.UsesVCC = MRI.isPhysRegUsed(AMDGPU::VCC_LO) ||
+                 MRI.isPhysRegUsed(AMDGPU::VCC_HI);
 
+  // If there are no calls, MachineRegisterInfo can tell us the used register
+  // count easily.
+  // A tail call isn't considered a call for MachineFrameInfo's purposes.
+  if (!FrameInfo.hasCalls() && !FrameInfo.hasTailCall()) {
     MCPhysReg HighestVGPRReg = AMDGPU::NoRegister;
     for (MCPhysReg Reg : reverse(AMDGPU::VGPR_32RegClass.getRegisters())) {
       if (MRI.isPhysRegUsed(Reg)) {
@@ -536,7 +528,158 @@ AMDGPUAsmPrinter::SIFunctionResourceInfo AMDGPUAsmPrinter::analyzeResourceUsage(
     return Info;
   }
 
-  llvm_unreachable("calls not implemented");
+  int32_t MaxVGPR = -1;
+  int32_t MaxSGPR = -1;
+  uint32_t CalleeFrameSize = 0;
+
+  for (const MachineBasicBlock &MBB : MF) {
+    for (const MachineInstr &MI : MBB) {
+      // TODO: Check regmasks? Do they occur anywhere except calls?
+      for (const MachineOperand &MO : MI.operands()) {
+        unsigned Width = 0;
+        bool IsSGPR = false;
+
+        if (!MO.isReg())
+          continue;
+
+        unsigned Reg = MO.getReg();
+        switch (Reg) {
+        case AMDGPU::EXEC:
+        case AMDGPU::EXEC_LO:
+        case AMDGPU::EXEC_HI:
+        case AMDGPU::SCC:
+        case AMDGPU::M0:
+        case AMDGPU::SRC_SHARED_BASE:
+        case AMDGPU::SRC_SHARED_LIMIT:
+        case AMDGPU::SRC_PRIVATE_BASE:
+        case AMDGPU::SRC_PRIVATE_LIMIT:
+          continue;
+
+        case AMDGPU::NoRegister:
+          assert(MI.isDebugValue());
+          continue;
+
+        case AMDGPU::VCC:
+        case AMDGPU::VCC_LO:
+        case AMDGPU::VCC_HI:
+          Info.UsesVCC = true;
+          continue;
+
+        case AMDGPU::FLAT_SCR:
+        case AMDGPU::FLAT_SCR_LO:
+        case AMDGPU::FLAT_SCR_HI:
+          continue;
+
+        case AMDGPU::TBA:
+        case AMDGPU::TBA_LO:
+        case AMDGPU::TBA_HI:
+        case AMDGPU::TMA:
+        case AMDGPU::TMA_LO:
+        case AMDGPU::TMA_HI:
+          llvm_unreachable("trap handler registers should not be used");
+
+        default:
+          break;
+        }
+
+        if (AMDGPU::SReg_32RegClass.contains(Reg)) {
+          assert(!AMDGPU::TTMP_32RegClass.contains(Reg) &&
+                 "trap handler registers should not be used");
+          IsSGPR = true;
+          Width = 1;
+        } else if (AMDGPU::VGPR_32RegClass.contains(Reg)) {
+          IsSGPR = false;
+          Width = 1;
+        } else if (AMDGPU::SReg_64RegClass.contains(Reg)) {
+          assert(!AMDGPU::TTMP_64RegClass.contains(Reg) &&
+                 "trap handler registers should not be used");
+          IsSGPR = true;
+          Width = 2;
+        } else if (AMDGPU::VReg_64RegClass.contains(Reg)) {
+          IsSGPR = false;
+          Width = 2;
+        } else if (AMDGPU::VReg_96RegClass.contains(Reg)) {
+          IsSGPR = false;
+          Width = 3;
+        } else if (AMDGPU::SReg_128RegClass.contains(Reg)) {
+          IsSGPR = true;
+          Width = 4;
+        } else if (AMDGPU::VReg_128RegClass.contains(Reg)) {
+          IsSGPR = false;
+          Width = 4;
+        } else if (AMDGPU::SReg_256RegClass.contains(Reg)) {
+          IsSGPR = true;
+          Width = 8;
+        } else if (AMDGPU::VReg_256RegClass.contains(Reg)) {
+          IsSGPR = false;
+          Width = 8;
+        } else if (AMDGPU::SReg_512RegClass.contains(Reg)) {
+          IsSGPR = true;
+          Width = 16;
+        } else if (AMDGPU::VReg_512RegClass.contains(Reg)) {
+          IsSGPR = false;
+          Width = 16;
+        } else {
+          llvm_unreachable("Unknown register class");
+        }
+        unsigned HWReg = TRI.getHWRegIndex(Reg);
+        int MaxUsed = HWReg + Width - 1;
+        if (IsSGPR) {
+          MaxSGPR = MaxUsed > MaxSGPR ? MaxUsed : MaxSGPR;
+        } else {
+          MaxVGPR = MaxUsed > MaxVGPR ? MaxUsed : MaxVGPR;
+        }
+      }
+
+      if (MI.isCall()) {
+        // Pseudo used just to encode the underlying global. Is there a better
+        // way to track this?
+
+        const MachineOperand *CalleeOp
+          = TII->getNamedOperand(MI, AMDGPU::OpName::callee);
+        const Function *Callee = cast<Function>(CalleeOp->getGlobal());
+        if (Callee->isDeclaration()) {
+          // If this is a call to an external function, we can't do much. Make
+          // conservative guesses.
+
+          // 48 SGPRs - vcc, - flat_scr, -xnack
+          int MaxSGPRGuess = 47 - getNumExtraSGPRs(ST, true,
+                                                   ST.hasFlatAddressSpace());
+          MaxSGPR = std::max(MaxSGPR, MaxSGPRGuess);
+          MaxVGPR = std::max(MaxVGPR, 23);
+
+          CalleeFrameSize = std::max(CalleeFrameSize, 16384u);
+          Info.UsesVCC = true;
+          Info.UsesFlatScratch = ST.hasFlatAddressSpace();
+          Info.HasDynamicallySizedStack = true;
+        } else {
+          // We force CodeGen to run in SCC order, so the callee's register
+          // usage etc. should be the cumulative usage of all callees.
+          auto I = CallGraphResourceInfo.find(Callee);
+          assert(I != CallGraphResourceInfo.end() &&
+                 "callee should have been handled before caller");
+
+          MaxSGPR = std::max(I->second.NumExplicitSGPR - 1, MaxSGPR);
+          MaxVGPR = std::max(I->second.NumVGPR - 1, MaxVGPR);
+          CalleeFrameSize
+            = std::max(I->second.PrivateSegmentSize, CalleeFrameSize);
+          Info.UsesVCC |= I->second.UsesVCC;
+          Info.UsesFlatScratch |= I->second.UsesFlatScratch;
+          Info.HasDynamicallySizedStack |= I->second.HasDynamicallySizedStack;
+          Info.HasRecursion |= I->second.HasRecursion;
+        }
+
+        if (!Callee->doesNotRecurse())
+          Info.HasRecursion = true;
+      }
+    }
+  }
+
+  Info.NumExplicitSGPR = MaxSGPR + 1;
+  Info.NumVGPR = MaxVGPR + 1;
+  Info.PrivateSegmentSize += CalleeFrameSize;
+
+  return Info;
 }
 
 void AMDGPUAsmPrinter::getSIProgramInfo(SIProgramInfo &ProgInfo,
@@ -877,20 +1020,29 @@ void AMDGPUAsmPrinter::getAmdKernelCode(amd_kernel_code_t &Out,
 bool AMDGPUAsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
                                        unsigned AsmVariant,
                                        const char *ExtraCode, raw_ostream &O) {
+  // First try the generic code, which knows about modifiers like 'c' and 'n'.
+  if (!AsmPrinter::PrintAsmOperand(MI, OpNo, AsmVariant, ExtraCode, O))
+    return false;
+
   if (ExtraCode && ExtraCode[0]) {
     if (ExtraCode[1] != 0)
       return true; // Unknown modifier.
 
     switch (ExtraCode[0]) {
-    default:
-      // See if this is a generic print operand
-      return AsmPrinter::PrintAsmOperand(MI, OpNo, AsmVariant, ExtraCode, O);
     case 'r':
       break;
+    default:
+      return true;
     }
   }
 
-  AMDGPUInstPrinter::printRegOperand(MI->getOperand(OpNo).getReg(), O,
-                   *TM.getSubtargetImpl(*MF->getFunction())->getRegisterInfo());
-  return false;
+  // TODO: Should be able to support other operand types like globals.
+  const MachineOperand &MO = MI->getOperand(OpNo);
+  if (MO.isReg()) {
+    AMDGPUInstPrinter::printRegOperand(MO.getReg(), O,
+                                       *MF->getSubtarget().getRegisterInfo());
+    return false;
+  }
+
+  return true;
 }

@@ -15,6 +15,7 @@
 #include "llvm/DebugInfo/PDB/GenericError.h"
 #include "llvm/DebugInfo/PDB/Native/DbiStream.h"
 #include "llvm/DebugInfo/PDB/Native/DbiStreamBuilder.h"
+#include "llvm/DebugInfo/PDB/Native/GSIStreamBuilder.h"
 #include "llvm/DebugInfo/PDB/Native/InfoStream.h"
 #include "llvm/DebugInfo/PDB/Native/InfoStreamBuilder.h"
 #include "llvm/DebugInfo/PDB/Native/PDBStringTableBuilder.h"
@@ -32,6 +33,8 @@ using namespace llvm::support;
 
 PDBFileBuilder::PDBFileBuilder(BumpPtrAllocator &Allocator)
     : Allocator(Allocator) {}
+
+PDBFileBuilder::~PDBFileBuilder() {}
 
 Error PDBFileBuilder::initialize(uint32_t BlockSize) {
   auto ExpectedMsf = MSFBuilder::create(Allocator, BlockSize);
@@ -71,6 +74,12 @@ PDBStringTableBuilder &PDBFileBuilder::getStringTableBuilder() {
   return Strings;
 }
 
+GSIStreamBuilder &PDBFileBuilder::getGsiBuilder() {
+  if (!Gsi)
+    Gsi = llvm::make_unique<GSIStreamBuilder>(*Msf);
+  return *Gsi;
+}
+
 Error PDBFileBuilder::addNamedStream(StringRef Name, uint32_t Size) {
   auto ExpectedStream = Msf->addStream(Size);
   if (!ExpectedStream)
@@ -80,13 +89,21 @@ Error PDBFileBuilder::addNamedStream(StringRef Name, uint32_t Size) {
 }
 
 Expected<msf::MSFLayout> PDBFileBuilder::finalizeMsfLayout() {
+
+  if (Ipi && Ipi->getRecordCount() > 0) {
+    // In theory newer PDBs always have an ID stream, but by saying that we're
+    // only going to *really* have an ID stream if there is at least one ID
+    // record, we leave open the opportunity to test older PDBs such as those
+    // that don't have an ID stream.
+    auto &Info = getInfoBuilder();
+    Info.addFeature(PdbRaw_FeatureSig::VC140);
+  }
+
   uint32_t StringsLen = Strings.calculateSerializedSize();
 
   if (auto EC = addNamedStream("/names", StringsLen))
     return std::move(EC);
   if (auto EC = addNamedStream("/LinkInfo", 0))
-    return std::move(EC);
-  if (auto EC = addNamedStream("/src/headerblock", 0))
     return std::move(EC);
 
   if (Info) {
@@ -105,6 +122,15 @@ Expected<msf::MSFLayout> PDBFileBuilder::finalizeMsfLayout() {
     if (auto EC = Ipi->finalizeMsfLayout())
       return std::move(EC);
   }
+  if (Gsi) {
+    if (auto EC = Gsi->finalizeMsfLayout())
+      return std::move(EC);
+    if (Dbi) {
+      Dbi->setPublicsStreamIndex(Gsi->getPublicsStreamIndex());
+      Dbi->setGlobalsStreamIndex(Gsi->getGlobalsStreamIndex());
+      Dbi->setSymbolRecordStreamIndex(Gsi->getRecordStreamIdx());
+    }
+  }
 
   return Msf->build();
 }
@@ -114,6 +140,31 @@ Expected<uint32_t> PDBFileBuilder::getNamedStreamIndex(StringRef Name) const {
   if (!NamedStreams.get(Name, SN))
     return llvm::make_error<pdb::RawError>(raw_error_code::no_stream);
   return SN;
+}
+
+void PDBFileBuilder::commitFpm(WritableBinaryStream &MsfBuffer,
+                               const MSFLayout &Layout) {
+  auto FpmStream =
+      WritableMappedBlockStream::createFpmStream(Layout, MsfBuffer, Allocator);
+
+  // We only need to create the alt fpm stream so that it gets initialized.
+  WritableMappedBlockStream::createFpmStream(Layout, MsfBuffer, Allocator,
+                                             true);
+
+  uint32_t BI = 0;
+  BinaryStreamWriter FpmWriter(*FpmStream);
+  while (BI < Layout.SB->NumBlocks) {
+    uint8_t ThisByte = 0;
+    for (uint32_t I = 0; I < 8; ++I) {
+      bool IsFree =
+          (BI < Layout.SB->NumBlocks) ? Layout.FreePageMap.test(BI) : true;
+      uint8_t Mask = uint8_t(IsFree) << I;
+      ThisByte |= Mask;
+      ++BI;
+    }
+    cantFail(FpmWriter.writeObject(ThisByte));
+  }
+  assert(FpmWriter.bytesRemaining() == 0);
 }
 
 Error PDBFileBuilder::commit(StringRef Filename) {
@@ -134,14 +185,17 @@ Error PDBFileBuilder::commit(StringRef Filename) {
 
   if (auto EC = Writer.writeObject(*Layout.SB))
     return EC;
+
+  commitFpm(Buffer, Layout);
+
   uint32_t BlockMapOffset =
       msf::blockToOffset(Layout.SB->BlockMapAddr, Layout.SB->BlockSize);
   Writer.setOffset(BlockMapOffset);
   if (auto EC = Writer.writeArray(Layout.DirectoryBlocks))
     return EC;
 
-  auto DirStream =
-      WritableMappedBlockStream::createDirectoryStream(Layout, Buffer);
+  auto DirStream = WritableMappedBlockStream::createDirectoryStream(
+      Layout, Buffer, Allocator);
   BinaryStreamWriter DW(*DirStream);
   if (auto EC = DW.writeInteger<uint32_t>(Layout.StreamSizes.size()))
     return EC;
@@ -158,8 +212,8 @@ Error PDBFileBuilder::commit(StringRef Filename) {
   if (!ExpectedSN)
     return ExpectedSN.takeError();
 
-  auto NS = WritableMappedBlockStream::createIndexedStream(Layout, Buffer,
-                                                           *ExpectedSN);
+  auto NS = WritableMappedBlockStream::createIndexedStream(
+      Layout, Buffer, *ExpectedSN, Allocator);
   BinaryStreamWriter NSWriter(*NS);
   if (auto EC = Strings.commit(NSWriter))
     return EC;
@@ -181,6 +235,11 @@ Error PDBFileBuilder::commit(StringRef Filename) {
 
   if (Ipi) {
     if (auto EC = Ipi->commit(Layout, Buffer))
+      return EC;
+  }
+
+  if (Gsi) {
+    if (auto EC = Gsi->commit(Layout, Buffer))
       return EC;
   }
 

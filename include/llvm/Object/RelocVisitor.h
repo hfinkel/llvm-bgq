@@ -17,15 +17,15 @@
 #define LLVM_OBJECT_RELOCVISITOR_H
 
 #include "llvm/ADT/Triple.h"
+#include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MachO.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/MachO.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Casting.h"
-#include "llvm/Support/ELF.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ErrorOr.h"
-#include "llvm/Support/MachO.h"
 #include <cstdint>
 #include <system_error>
 
@@ -169,6 +169,8 @@ private:
       return (Value + getELFAddend(R)) & 0xFFFFFFFF;
     case ELF::R_MIPS_64:
       return Value + getELFAddend(R);
+    case ELF::R_MIPS_TLS_DTPREL64:
+      return Value + getELFAddend(R) - 0x8000;
     }
     HasError = true;
     return 0;
@@ -260,7 +262,10 @@ private:
   }
 
   uint64_t visitMips32(uint32_t Rel, RelocationRef R, uint64_t Value) {
+    // FIXME: Take in account implicit addends to get correct results.
     if (Rel == ELF::R_MIPS_32)
+      return Value & 0xFFFFFFFF;
+    if (Rel == ELF::R_MIPS_TLS_DTPREL32)
       return Value & 0xFFFFFFFF;
     HasError = true;
     return 0;

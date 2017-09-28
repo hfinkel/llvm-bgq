@@ -23,9 +23,9 @@ define <8 x i16> @pr25080(<8 x i32> %a) {
 ;
 ; KNL-32-LABEL: pr25080:
 ; KNL-32:       # BB#0: # %entry
-; KNL-32-NEXT:    vpbroadcastd {{\.LCPI.*}}, %ymm1
+; KNL-32-NEXT:    vpbroadcastd {{.*#+}} ymm1 = [8388607,8388607,8388607,8388607,8388607,8388607,8388607,8388607]
 ; KNL-32-NEXT:    vpand %ymm1, %ymm0, %ymm0
-; KNL-32-NEXT:    vpxor %ymm1, %ymm1, %ymm1
+; KNL-32-NEXT:    vpxor %xmm1, %xmm1, %xmm1
 ; KNL-32-NEXT:    vpcmpeqd %zmm1, %zmm0, %k0
 ; KNL-32-NEXT:    movb $15, %al
 ; KNL-32-NEXT:    kmovw %eax, %k1
@@ -45,64 +45,21 @@ define void @pr26232(i64 %a, <16 x i1> %b) {
 ; AVX-LABEL: pr26232:
 ; AVX:       # BB#0: # %for_loop599.preheader
 ; AVX-NEXT:    vpxor %xmm1, %xmm1, %xmm1
+; AVX-NEXT:    vmovdqa {{.*#+}} xmm2 = [128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128]
 ; AVX-NEXT:    .p2align 4, 0x90
 ; AVX-NEXT:  .LBB1_1: # %for_loop599
 ; AVX-NEXT:    # =>This Inner Loop Header: Depth=1
 ; AVX-NEXT:    xorl %eax, %eax
 ; AVX-NEXT:    cmpq $65536, %rdi # imm = 0x10000
 ; AVX-NEXT:    setl %al
-; AVX-NEXT:    vmovd %eax, %xmm2
-; AVX-NEXT:    vpshufb %xmm1, %xmm2, %xmm2
-; AVX-NEXT:    vpand %xmm0, %xmm2, %xmm2
-; AVX-NEXT:    vpextrb $15, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $14, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $13, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $12, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $11, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $10, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $9, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $8, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $7, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $6, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $5, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $4, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $3, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $2, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $1, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    vpextrb $0, %xmm2, %eax
-; AVX-NEXT:    andb $1, %al
-; AVX-NEXT:    movb %al, -{{[0-9]+}}(%rsp)
-; AVX-NEXT:    cmpw $0, -{{[0-9]+}}(%rsp)
+; AVX-NEXT:    vmovd %eax, %xmm3
+; AVX-NEXT:    vpshufb %xmm1, %xmm3, %xmm3
+; AVX-NEXT:    vpand %xmm0, %xmm3, %xmm3
+; AVX-NEXT:    vpsllw $7, %xmm3, %xmm3
+; AVX-NEXT:    vpand %xmm2, %xmm3, %xmm3
+; AVX-NEXT:    vpcmpgtb %xmm3, %xmm1, %xmm3
+; AVX-NEXT:    vpmovmskb %xmm3, %eax
+; AVX-NEXT:    testw %ax, %ax
 ; AVX-NEXT:    jne .LBB1_1
 ; AVX-NEXT:  # BB#2: # %for_exit600
 ; AVX-NEXT:    retq

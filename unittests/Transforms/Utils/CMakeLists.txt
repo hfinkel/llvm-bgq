@@ -1,5 +1,6 @@
 set(LLVM_LINK_COMPONENTS
   Analysis
+  AsmParser
   Core
   Support
   TransformUtils
@@ -11,5 +12,6 @@ add_llvm_unittest(UtilsTests
   FunctionComparator.cpp
   IntegerDivision.cpp
   Local.cpp
+  OrderedInstructions.cpp
   ValueMapperTest.cpp
   )

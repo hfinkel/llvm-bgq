@@ -35,9 +35,17 @@ public:
   int getFrameIndexReference(const MachineFunction &MF, int FI,
                              unsigned &FrameReg) const override;
 
+  void determineCalleeSaves(MachineFunction &MF, BitVector &SavedRegs,
+                            RegScavenger *RS = nullptr) const override;
+
   void processFunctionBeforeFrameFinalized(
     MachineFunction &MF,
     RegScavenger *RS = nullptr) const override;
+
+  MachineBasicBlock::iterator
+  eliminateCallFramePseudoInstr(MachineFunction &MF,
+                                MachineBasicBlock &MBB,
+                                MachineBasicBlock::iterator MI) const override;
 
 private:
   void emitFlatScratchInit(const SISubtarget &ST,
@@ -60,6 +68,10 @@ private:
 
   /// \brief Emits debugger prologue.
   void emitDebuggerPrologue(MachineFunction &MF, MachineBasicBlock &MBB) const;
+
+public:
+  bool hasFP(const MachineFunction &MF) const override;
+  bool hasSP(const MachineFunction &MF) const;
 };
 
 } // end namespace llvm

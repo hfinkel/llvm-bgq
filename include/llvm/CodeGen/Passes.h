@@ -133,8 +133,15 @@ namespace llvm {
   // instruction and update the MachineFunctionInfo with that information.
   extern char &ShrinkWrapID;
 
+  /// LiveRangeShrink pass. Move instruction close to its definition to shrink
+  /// the definition's live range.
+  extern char &LiveRangeShrinkID;
+
   /// Greedy register allocator.
   extern char &RAGreedyID;
+
+  /// Basic register allocator.
+  extern char &RABasicID;
 
   /// VirtRegRewriter pass. Rewrite virtual registers to physical registers as
   /// assigned in VirtRegMap.
@@ -401,9 +408,6 @@ namespace llvm {
 
   /// This pass frees the memory occupied by the MachineFunction.
   FunctionPass *createFreeMachineFunctionPass();
-
-  /// This pass combine basic blocks guarded by the same branch.
-  extern char &BranchCoalescingID;
 
   /// This pass performs outlining on machine instructions directly before
   /// printing assembly.

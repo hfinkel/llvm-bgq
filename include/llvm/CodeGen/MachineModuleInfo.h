@@ -47,7 +47,6 @@ class BasicBlock;
 class CallInst;
 class Function;
 class MachineFunction;
-class MachineFunctionInitializer;
 class MMIAddrLabelMap;
 class Module;
 class TargetMachine;
@@ -126,7 +125,16 @@ class MachineModuleInfo : public ImmutablePass {
   /// comments in lib/Target/X86/X86FrameLowering.cpp for more details.
   bool UsesMorestackAddr;
 
-  MachineFunctionInitializer *MFInitializer;
+  /// True if the module contains split-stack functions. This is used to
+  /// emit .note.GNU-split-stack section as required by the linker for
+  /// special handling split-stack function calling no-split-stack function.
+  bool HasSplitStack;
+
+  /// True if the module contains no-split-stack functions. This is used to
+  /// emit .note.GNU-no-split-stack section when it also contains split-stack
+  /// functions.
+  bool HasNosplitStack;
+
   /// Maps IR Functions to their corresponding MachineFunctions.
   DenseMap<const Function*, std::unique_ptr<MachineFunction>> MachineFunctions;
   /// Next unique number available for a MachineFunction.
@@ -150,14 +158,13 @@ public:
   void setModule(const Module *M) { TheModule = M; }
   const Module *getModule() const { return TheModule; }
 
-  void setMachineFunctionInitializer(MachineFunctionInitializer *MFInit) {
-    MFInitializer = MFInit;
-  }
-
   /// Returns the MachineFunction constructed for the IR function \p F.
-  /// Creates a new MachineFunction and runs the MachineFunctionInitializer
-  /// if none exists yet.
-  MachineFunction &getMachineFunction(const Function &F);
+  /// Creates a new MachineFunction if none exists yet.
+  MachineFunction &getOrCreateMachineFunction(const Function &F);
+
+  /// \bried Returns the MachineFunction associated to IR function \p F if there
+  /// is one, otherwise nullptr.
+  MachineFunction *getMachineFunction(const Function &F) const;
 
   /// Delete the MachineFunction \p MF and reset the link in the IR Function to
   /// Machine Function map.
@@ -195,6 +202,22 @@ public:
 
   void setUsesMorestackAddr(bool b) {
     UsesMorestackAddr = b;
+  }
+
+  bool hasSplitStack() const {
+    return HasSplitStack;
+  }
+
+  void setHasSplitStack(bool b) {
+    HasSplitStack = b;
+  }
+
+  bool hasNosplitStack() const {
+    return HasNosplitStack;
+  }
+
+  void setHasNosplitStack(bool b) {
+    HasNosplitStack = b;
   }
 
   /// Return the symbol to be used for the specified basic block when its

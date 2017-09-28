@@ -23,6 +23,8 @@
 #include "MCTargetDesc/ARMMCExpr.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/BinaryFormat/COFF.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
@@ -43,9 +45,7 @@
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ARMBuildAttributes.h"
-#include "llvm/Support/COFF.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/ELF.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/TargetParser.h"
 #include "llvm/Support/TargetRegistry.h"
@@ -173,10 +173,10 @@ bool ARMAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
   if (! ThumbIndirectPads.empty()) {
     OutStreamer->EmitAssemblerFlag(MCAF_Code16);
     EmitAlignment(1);
-    for (unsigned i = 0, e = ThumbIndirectPads.size(); i < e; i++) {
-      OutStreamer->EmitLabel(ThumbIndirectPads[i].second);
+    for (std::pair<unsigned, MCSymbol *> &TIP : ThumbIndirectPads) {
+      OutStreamer->EmitLabel(TIP.second);
       EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::tBX)
-        .addReg(ThumbIndirectPads[i].first)
+        .addReg(TIP.first)
         // Add predicate operands.
         .addImm(ARMCC::AL)
         .addReg(0));
@@ -476,11 +476,7 @@ void ARMAsmPrinter::EmitStartOfAsmFile(Module &M) {
   // Use the triple's architecture and subarchitecture to determine
   // if we're thumb for the purposes of the top level code16 assembler
   // flag.
-  bool isThumb = TT.getArch() == Triple::thumb ||
-                 TT.getArch() == Triple::thumbeb ||
-                 TT.getSubArch() == Triple::ARMSubArch_v7m ||
-                 TT.getSubArch() == Triple::ARMSubArch_v6m;
-  if (!M.getModuleInlineAsm().empty() && isThumb)
+  if (!M.getModuleInlineAsm().empty() && TT.isThumb())
     OutStreamer->EmitAssemblerFlag(MCAF_Code16);
 }
 
@@ -869,11 +865,12 @@ EmitMachineConstantPoolValue(MachineConstantPoolValue *MCPV) {
     // However, if this global is promoted into several functions we must ensure
     // we don't try and emit duplicate symbols!
     auto *ACPC = cast<ARMConstantPoolConstant>(ACPV);
-    auto *GV = ACPC->getPromotedGlobal();
-    if (!EmittedPromotedGlobalLabels.count(GV)) {
-      MCSymbol *GVSym = getSymbol(GV);
-      OutStreamer->EmitLabel(GVSym);
-      EmittedPromotedGlobalLabels.insert(GV);
+    for (const auto *GV : ACPC->promotedGlobals()) {
+      if (!EmittedPromotedGlobalLabels.count(GV)) {
+        MCSymbol *GVSym = getSymbol(GV);
+        OutStreamer->EmitLabel(GVSym);
+        EmittedPromotedGlobalLabels.insert(GV);
+      }
     }
     return EmitGlobalConstant(DL, ACPC->getPromotedGlobalInit());
   }
@@ -949,8 +946,7 @@ void ARMAsmPrinter::EmitJumpTableAddrs(const MachineInstr *MI) {
   const std::vector<MachineJumpTableEntry> &JT = MJTI->getJumpTables();
   const std::vector<MachineBasicBlock*> &JTBBs = JT[JTI].MBBs;
 
-  for (unsigned i = 0, e = JTBBs.size(); i != e; ++i) {
-    MachineBasicBlock *MBB = JTBBs[i];
+  for (MachineBasicBlock *MBB : JTBBs) {
     // Construct an MCExpr for the entry. We want a value of the form:
     // (BasicBlockAddr - TableBeginAddr)
     //
@@ -993,8 +989,7 @@ void ARMAsmPrinter::EmitJumpTableInsts(const MachineInstr *MI) {
   const std::vector<MachineJumpTableEntry> &JT = MJTI->getJumpTables();
   const std::vector<MachineBasicBlock*> &JTBBs = JT[JTI].MBBs;
 
-  for (unsigned i = 0, e = JTBBs.size(); i != e; ++i) {
-    MachineBasicBlock *MBB = JTBBs[i];
+  for (MachineBasicBlock *MBB : JTBBs) {
     const MCExpr *MBBSymbolExpr = MCSymbolRefExpr::create(MBB->getSymbol(),
                                                           OutContext);
     // If this isn't a TBB or TBH, the entries are direct branch instructions.
@@ -1103,6 +1098,7 @@ void ARMAsmPrinter::EmitUnwindingInstruction(const MachineInstr *MI) {
     case ARM::tPUSH:
       // Special case here: no src & dst reg, but two extra imp ops.
       StartOp = 2; NumOffset = 2;
+      LLVM_FALLTHROUGH;
     case ARM::STMDB_UPD:
     case ARM::t2STMDB_UPD:
     case ARM::VSTMDDB_UPD:
@@ -1275,6 +1271,7 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       // Add 's' bit operand (always reg0 for this)
       .addReg(0));
 
+    assert(Subtarget->hasV4TOps());
     EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::BX)
       .addReg(MI->getOperand(0).getReg()));
     return;
@@ -1291,9 +1288,9 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
 
     unsigned TReg = MI->getOperand(0).getReg();
     MCSymbol *TRegSym = nullptr;
-    for (unsigned i = 0, e = ThumbIndirectPads.size(); i < e; i++) {
-      if (ThumbIndirectPads[i].first == TReg) {
-        TRegSym = ThumbIndirectPads[i].second;
+    for (std::pair<unsigned, MCSymbol *> &TIP : ThumbIndirectPads) {
+      if (TIP.first == TReg) {
+        TRegSym = TIP.second;
         break;
       }
     }
@@ -1504,6 +1501,9 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
     return;
   }
   case ARM::CONSTPOOL_ENTRY: {
+    if (Subtarget->genExecuteOnly())
+      llvm_unreachable("execute-only should not generate constant pools");
+
     /// CONSTPOOL_ENTRY - This instruction represents a floating constant pool
     /// in the function.  The first operand is the ID# for this instruction, the
     /// second is the index into the MachineConstantPool that this is, the third
@@ -1892,6 +1892,7 @@ void ARMAsmPrinter::EmitInstruction(const MachineInstr *MI) {
       .addImm(ARMCC::AL)
       .addReg(0));
 
+    assert(Subtarget->hasV4TOps());
     EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::BX)
       .addReg(ScratchReg)
       // Predicate.

@@ -14,8 +14,9 @@
 #ifndef LLVM_OBJECT_OBJECTFILE_H
 #define LLVM_OBJECT_OBJECTFILE_H
 
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/iterator_range.h"
+#include "llvm/BinaryFormat/Magic.h"
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/Error.h"
@@ -108,6 +109,7 @@ public:
   bool isBSS() const;
   bool isVirtual() const;
   bool isBitcode() const;
+  bool isStripped() const;
 
   bool containsSymbol(SymbolRef S) const;
 
@@ -235,6 +237,7 @@ protected:
   // A section is 'virtual' if its contents aren't present in the object image.
   virtual bool isSectionVirtual(DataRefImpl Sec) const = 0;
   virtual bool isSectionBitcode(DataRefImpl Sec) const;
+  virtual bool isSectionStripped(DataRefImpl Sec) const;
   virtual relocation_iterator section_rel_begin(DataRefImpl Sec) const = 0;
   virtual relocation_iterator section_rel_end(DataRefImpl Sec) const = 0;
   virtual section_iterator getRelocatedSection(DataRefImpl Sec) const;
@@ -281,6 +284,9 @@ public:
   virtual SubtargetFeatures getFeatures() const = 0;
   virtual void setARMSubArch(Triple &TheTriple) const { }
 
+  /// @brief Create a triple from the data in this object file.
+  Triple makeTriple() const;
+
   /// Returns platform-specific object flags, if any.
   virtual std::error_code getPlatformFlags(unsigned &Result) const {
     Result = 0;
@@ -291,6 +297,9 @@ public:
     getBuildAttributes(ARMAttributeParser &Attributes) const {
       return std::error_code();
     }
+
+  /// Maps a debug section name to a standard DWARF section name.
+  virtual StringRef mapDebugSectionName(StringRef Name) const { return Name; }
 
   /// True if this is a relocatable object (.o/.obj).
   virtual bool isRelocatableObject() const = 0;
@@ -303,13 +312,13 @@ public:
   createObjectFile(StringRef ObjectPath);
 
   static Expected<std::unique_ptr<ObjectFile>>
-  createObjectFile(MemoryBufferRef Object, sys::fs::file_magic Type);
+  createObjectFile(MemoryBufferRef Object, llvm::file_magic Type);
   static Expected<std::unique_ptr<ObjectFile>>
   createObjectFile(MemoryBufferRef Object) {
-    return createObjectFile(Object, sys::fs::file_magic::unknown);
+    return createObjectFile(Object, llvm::file_magic::unknown);
   }
 
-  static inline bool classof(const Binary *v) {
+  static bool classof(const Binary *v) {
     return v->isObject();
   }
 
@@ -433,6 +442,10 @@ inline bool SectionRef::isVirtual() const {
 
 inline bool SectionRef::isBitcode() const {
   return OwningObject->isSectionBitcode(SectionPimpl);
+}
+
+inline bool SectionRef::isStripped() const {
+  return OwningObject->isSectionStripped(SectionPimpl);
 }
 
 inline relocation_iterator SectionRef::relocation_begin() const {

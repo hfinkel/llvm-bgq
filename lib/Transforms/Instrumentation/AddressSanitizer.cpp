@@ -22,9 +22,11 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Argument.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/DataLayout.h"
@@ -43,6 +45,7 @@
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/SwapByteOrder.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Instrumentation.h"
@@ -80,6 +83,7 @@ static const uint64_t kMIPS64_ShadowOffset64 = 1ULL << 37;
 static const uint64_t kAArch64_ShadowOffset64 = 1ULL << 36;
 static const uint64_t kFreeBSD_ShadowOffset32 = 1ULL << 30;
 static const uint64_t kFreeBSD_ShadowOffset64 = 1ULL << 46;
+static const uint64_t kNetBSD_ShadowOffset64 = 1ULL << 46;
 static const uint64_t kPS4CPU_ShadowOffset64 = 1ULL << 40;
 static const uint64_t kWindowsShadowOffset32 = 3ULL << 28;
 // The shadow memory space is dynamically allocated.
@@ -192,6 +196,11 @@ static cl::opt<uint32_t> ClMaxInlinePoisoningSize(
 static cl::opt<bool> ClUseAfterReturn("asan-use-after-return",
                                       cl::desc("Check stack-use-after-return"),
                                       cl::Hidden, cl::init(true));
+static cl::opt<bool> ClRedzoneByvalArgs("asan-redzone-byval-args",
+                                        cl::desc("Create redzones for byval "
+                                                 "arguments (extra copy "
+                                                 "required)"), cl::Hidden,
+                                        cl::init(true));
 static cl::opt<bool> ClUseAfterScope("asan-use-after-scope",
                                      cl::desc("Check stack-use-after-scope"),
                                      cl::Hidden, cl::init(false));
@@ -394,6 +403,7 @@ static ShadowMapping getShadowMapping(Triple &TargetTriple, int LongSize,
   bool IsAndroid = TargetTriple.isAndroid();
   bool IsIOS = TargetTriple.isiOS() || TargetTriple.isWatchOS();
   bool IsFreeBSD = TargetTriple.isOSFreeBSD();
+  bool IsNetBSD = TargetTriple.isOSNetBSD();
   bool IsPS4CPU = TargetTriple.isPS4CPU();
   bool IsLinux = TargetTriple.isOSLinux();
   bool IsPPC64 = TargetTriple.getArch() == llvm::Triple::ppc64 ||
@@ -438,6 +448,8 @@ static ShadowMapping getShadowMapping(Triple &TargetTriple, int LongSize,
       Mapping.Offset = kSystemZ_ShadowOffset64;
     else if (IsFreeBSD)
       Mapping.Offset = kFreeBSD_ShadowOffset64;
+    else if (IsNetBSD)
+      Mapping.Offset = kNetBSD_ShadowOffset64;
     else if (IsPS4CPU)
       Mapping.Offset = kPS4CPU_ShadowOffset64;
     else if (IsLinux && IsX86_64) {
@@ -747,6 +759,10 @@ struct FunctionStackPoisoner : public InstVisitor<FunctionStackPoisoner> {
 
   bool runOnFunction() {
     if (!ClStack) return false;
+
+    if (ClRedzoneByvalArgs)
+      copyArgsPassedByValToAllocas();
+
     // Collect alloca, ret, lifetime instructions etc.
     for (BasicBlock *BB : depth_first(&F.getEntryBlock())) visit(*BB);
 
@@ -762,6 +778,11 @@ struct FunctionStackPoisoner : public InstVisitor<FunctionStackPoisoner> {
     }
     return true;
   }
+
+  // Arguments marked with the "byval" attribute are implicitly copied without
+  // using an alloca instruction.  To produce redzones for those arguments, we
+  // copy them a second time into memory allocated with an alloca instruction.
+  void copyArgsPassedByValToAllocas();
 
   // Finds all Alloca instructions and puts
   // poisoned red zones around all of them.
@@ -1230,7 +1251,7 @@ static void instrumentMaskedLoadOrStore(AddressSanitizer *Pass,
     if (auto *Vector = dyn_cast<ConstantVector>(Mask)) {
       // dyn_cast as we might get UndefValue
       if (auto *Masked = dyn_cast<ConstantInt>(Vector->getOperand(Idx))) {
-        if (Masked->isNullValue())
+        if (Masked->isZero())
           // Mask is constant false, so no instrumentation needed.
           continue;
         // If we have a true or undef value, fall through to doInstrumentAddress
@@ -2117,31 +2138,31 @@ void AddressSanitizer::initializeCallbacks(Module &M) {
         Args2.push_back(ExpType);
         Args1.push_back(ExpType);
       }
-	    AsanErrorCallbackSized[AccessIsWrite][Exp] =
-	        checkSanitizerInterfaceFunction(M.getOrInsertFunction(
-	            kAsanReportErrorTemplate + ExpStr + TypeStr + SuffixStr +
-	                EndingStr,
-	            FunctionType::get(IRB.getVoidTy(), Args2, false)));
+      AsanErrorCallbackSized[AccessIsWrite][Exp] =
+          checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+              kAsanReportErrorTemplate + ExpStr + TypeStr + SuffixStr +
+                  EndingStr,
+              FunctionType::get(IRB.getVoidTy(), Args2, false)));
 
-	    AsanMemoryAccessCallbackSized[AccessIsWrite][Exp] =
-	        checkSanitizerInterfaceFunction(M.getOrInsertFunction(
-	            ClMemoryAccessCallbackPrefix + ExpStr + TypeStr + "N" + EndingStr,
-	            FunctionType::get(IRB.getVoidTy(), Args2, false)));
+      AsanMemoryAccessCallbackSized[AccessIsWrite][Exp] =
+          checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+              ClMemoryAccessCallbackPrefix + ExpStr + TypeStr + "N" + EndingStr,
+              FunctionType::get(IRB.getVoidTy(), Args2, false)));
 
-	    for (size_t AccessSizeIndex = 0; AccessSizeIndex < kNumberOfAccessSizes;
-	         AccessSizeIndex++) {
-	      const std::string Suffix = TypeStr + itostr(1ULL << AccessSizeIndex);
-	      AsanErrorCallback[AccessIsWrite][Exp][AccessSizeIndex] =
-	          checkSanitizerInterfaceFunction(M.getOrInsertFunction(
-	              kAsanReportErrorTemplate + ExpStr + Suffix + EndingStr,
-	              FunctionType::get(IRB.getVoidTy(), Args1, false)));
+      for (size_t AccessSizeIndex = 0; AccessSizeIndex < kNumberOfAccessSizes;
+           AccessSizeIndex++) {
+        const std::string Suffix = TypeStr + itostr(1ULL << AccessSizeIndex);
+        AsanErrorCallback[AccessIsWrite][Exp][AccessSizeIndex] =
+            checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+                kAsanReportErrorTemplate + ExpStr + Suffix + EndingStr,
+                FunctionType::get(IRB.getVoidTy(), Args1, false)));
 
-	      AsanMemoryAccessCallback[AccessIsWrite][Exp][AccessSizeIndex] =
-	          checkSanitizerInterfaceFunction(M.getOrInsertFunction(
-	              ClMemoryAccessCallbackPrefix + ExpStr + Suffix + EndingStr,
-	              FunctionType::get(IRB.getVoidTy(), Args1, false)));
-	    }
-	  }
+        AsanMemoryAccessCallback[AccessIsWrite][Exp][AccessSizeIndex] =
+            checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+                ClMemoryAccessCallbackPrefix + ExpStr + Suffix + EndingStr,
+                FunctionType::get(IRB.getVoidTy(), Args1, false)));
+      }
+    }
   }
 
   const std::string MemIntrinCallbackPrefix =
@@ -2526,6 +2547,33 @@ static int StackMallocSizeClass(uint64_t LocalStackSize) {
   for (int i = 0;; i++, MaxSize *= 2)
     if (LocalStackSize <= MaxSize) return i;
   llvm_unreachable("impossible LocalStackSize");
+}
+
+void FunctionStackPoisoner::copyArgsPassedByValToAllocas() {
+  Instruction *CopyInsertPoint = &F.front().front();
+  if (CopyInsertPoint == ASan.LocalDynamicShadow) {
+    // Insert after the dynamic shadow location is determined
+    CopyInsertPoint = CopyInsertPoint->getNextNode();
+    assert(CopyInsertPoint);
+  }
+  IRBuilder<> IRB(CopyInsertPoint);
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  for (Argument &Arg : F.args()) {
+    if (Arg.hasByValAttr()) {
+      Type *Ty = Arg.getType()->getPointerElementType();
+      unsigned Align = Arg.getParamAlignment();
+      if (Align == 0) Align = DL.getABITypeAlignment(Ty);
+
+      const std::string &Name = Arg.hasName() ? Arg.getName().str() :
+          "Arg" + llvm::to_string(Arg.getArgNo());
+      AllocaInst *AI = IRB.CreateAlloca(Ty, nullptr, Twine(Name) + ".byval");
+      AI->setAlignment(Align);
+      Arg.replaceAllUsesWith(AI);
+
+      uint64_t AllocSize = DL.getTypeAllocSize(Ty);
+      IRB.CreateMemCpy(AI, &Arg, AllocSize, Align);
+    }
+  }
 }
 
 PHINode *FunctionStackPoisoner::createPHI(IRBuilder<> &IRB, Value *Cond,

@@ -40,7 +40,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Scalar/GuardWidening.h"
-#include "llvm/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -50,6 +49,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Transforms/Scalar.h"
@@ -664,6 +664,7 @@ PreservedAnalyses GuardWideningPass::run(Function &F,
   return PA;
 }
 
+#ifndef NDEBUG
 StringRef GuardWideningImpl::scoreTypeToString(WideningScore WS) {
   switch (WS) {
   case WS_IllegalOrNegative:
@@ -678,6 +679,7 @@ StringRef GuardWideningImpl::scoreTypeToString(WideningScore WS) {
 
   llvm_unreachable("Fully covered switch above!");
 }
+#endif
 
 char GuardWideningLegacyPass::ID = 0;
 

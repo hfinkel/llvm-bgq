@@ -68,6 +68,7 @@ class SubtargetEmitter {
     }
   };
 
+  const CodeGenTarget &TGT;
   RecordKeeper &Records;
   CodeGenSchedModels &SchedModels;
   std::string Target;
@@ -106,12 +107,14 @@ class SubtargetEmitter {
   void EmitProcessorLookup(raw_ostream &OS);
   void EmitSchedModelHelpers(const std::string &ClassName, raw_ostream &OS);
   void EmitSchedModel(raw_ostream &OS);
+  void EmitHwModeCheck(const std::string &ClassName, raw_ostream &OS);
   void ParseFeaturesFunction(raw_ostream &OS, unsigned NumFeatures,
                              unsigned NumProcs);
 
 public:
-  SubtargetEmitter(RecordKeeper &R, CodeGenTarget &TGT):
-    Records(R), SchedModels(TGT.getSchedModels()), Target(TGT.getName()) {}
+  SubtargetEmitter(RecordKeeper &R, CodeGenTarget &TGT)
+    : TGT(TGT), Records(R), SchedModels(TGT.getSchedModels()),
+      Target(TGT.getName()) {}
 
   void run(raw_ostream &o);
 };
@@ -180,9 +183,9 @@ unsigned SubtargetEmitter::FeatureKeyValues(raw_ostream &OS) {
     // Next feature
     Record *Feature = FeatureList[i];
 
-    const std::string &Name = Feature->getName();
-    const std::string &CommandLineName = Feature->getValueAsString("Name");
-    const std::string &Desc = Feature->getValueAsString("Desc");
+    StringRef Name = Feature->getName();
+    StringRef CommandLineName = Feature->getValueAsString("Name");
+    StringRef Desc = Feature->getValueAsString("Desc");
 
     if (CommandLineName.empty()) continue;
 
@@ -237,7 +240,7 @@ unsigned SubtargetEmitter::CPUKeyValues(raw_ostream &OS) {
     // Next processor
     Record *Processor = ProcessorList[i];
 
-    const std::string &Name = Processor->getValueAsString("Name");
+    StringRef Name = Processor->getValueAsString("Name");
     const std::vector<Record*> &FeatureList =
       Processor->getValueAsListOfDefs("Features");
 
@@ -375,7 +378,7 @@ EmitStageAndOperandCycleData(raw_ostream &OS,
     if (FUs.empty())
       continue;
 
-    const std::string &Name = ProcModel.ItinsDef->getName();
+    StringRef Name = ProcModel.ItinsDef->getName();
     OS << "\n// Functional units for \"" << Name << "\"\n"
        << "namespace " << Name << "FU {\n";
 
@@ -429,7 +432,7 @@ EmitStageAndOperandCycleData(raw_ostream &OS,
     if (!ProcModel.hasItineraries())
       continue;
 
-    const std::string &Name = ProcModel.ItinsDef->getName();
+    StringRef Name = ProcModel.ItinsDef->getName();
 
     ItinList.resize(SchedModels.numInstrSchedClasses());
     assert(ProcModel.ItinDefList.size() == ItinList.size() && "bad Itins");
@@ -546,9 +549,6 @@ EmitItineraries(raw_ostream &OS,
     if (!ItinsDefSet.insert(ItinsDef).second)
       continue;
 
-    // Get processor itinerary name
-    const std::string &Name = ItinsDef->getName();
-
     // Get the itinerary list for the processor.
     assert(ProcItinListsIter != ProcItinLists.end() && "bad iterator");
     std::vector<InstrItinerary> &ItinList = *ProcItinListsIter;
@@ -562,7 +562,7 @@ EmitItineraries(raw_ostream &OS,
     OS << "static const llvm::InstrItinerary ";
 
     // Begin processor itinerary table
-    OS << Name << "[] = {\n";
+    OS << ItinsDef->getName() << "[] = {\n";
 
     // For each itinerary class in CodeGenSchedClass::Index order.
     for (unsigned j = 0, M = ItinList.size(); j < M; ++j) {
@@ -805,6 +805,7 @@ void SubtargetEmitter::GenSchedClassTables(const CodeGenProcModel &ProcModel,
     return;
 
   std::vector<MCSchedClassDesc> &SCTab = SchedTables.ProcSchedClasses.back();
+  DEBUG(dbgs() << "\n+++ SCHED CLASSES (GenSchedClassTables) +++\n");
   for (const CodeGenSchedClass &SC : SchedModels.schedClasses()) {
     DEBUG(SC.dump(&SchedModels));
 
@@ -1212,7 +1213,7 @@ void SubtargetEmitter::EmitProcessorLookup(raw_ostream &OS) {
     // Next processor
     Record *Processor = ProcessorList[i];
 
-    const std::string &Name = Processor->getValueAsString("Name");
+    StringRef Name = Processor->getValueAsString("Name");
     const std::string &ProcModelName =
       SchedModels.getModelForProc(Processor).ModelName;
 
@@ -1236,7 +1237,7 @@ void SubtargetEmitter::EmitSchedModel(raw_ostream &OS) {
   OS << "#ifdef DBGFIELD\n"
      << "#error \"<target>GenSubtargetInfo.inc requires a DBGFIELD macro\"\n"
      << "#endif\n"
-     << "#ifndef NDEBUG\n"
+     << "#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)\n"
      << "#define DBGFIELD(x) x,\n"
      << "#else\n"
      << "#define DBGFIELD(x)\n"
@@ -1331,6 +1332,22 @@ void SubtargetEmitter::EmitSchedModelHelpers(const std::string &ClassName,
      << "} // " << ClassName << "::resolveSchedClass\n";
 }
 
+void SubtargetEmitter::EmitHwModeCheck(const std::string &ClassName,
+                                       raw_ostream &OS) {
+  const CodeGenHwModes &CGH = TGT.getHwModes();
+  assert(CGH.getNumModeIds() > 0);
+  if (CGH.getNumModeIds() == 1)
+    return;
+
+  OS << "unsigned " << ClassName << "::getHwMode() const {\n";
+  for (unsigned M = 1, NumModes = CGH.getNumModeIds(); M != NumModes; ++M) {
+    const HwMode &HM = CGH.getMode(M);
+    OS << "  if (checkFeatures(\"" << HM.Features
+       << "\")) return " << M << ";\n";
+  }
+  OS << "  return 0;\n}\n";
+}
+
 //
 // ParseFeaturesFunction - Produces a subtarget specific function for parsing
 // the subtarget features string.
@@ -1360,9 +1377,9 @@ void SubtargetEmitter::ParseFeaturesFunction(raw_ostream &OS,
 
   for (Record *R : Features) {
     // Next record
-    const std::string &Instance = R->getName();
-    const std::string &Value = R->getValueAsString("Value");
-    const std::string &Attribute = R->getValueAsString("Attribute");
+    StringRef Instance = R->getName();
+    StringRef Value = R->getValueAsString("Value");
+    StringRef Attribute = R->getValueAsString("Attribute");
 
     if (Value=="true" || Value=="false")
       OS << "  if (Bits[" << Target << "::"
@@ -1464,9 +1481,11 @@ void SubtargetEmitter::run(raw_ostream &OS) {
      << " const MachineInstr *DefMI,"
      << " const TargetSchedModel *SchedModel) const override;\n"
      << "  DFAPacketizer *createDFAPacketizer(const InstrItineraryData *IID)"
-     << " const;\n"
-     << "};\n";
-  OS << "} // end namespace llvm\n\n";
+     << " const;\n";
+  if (TGT.getHwModes().getNumModeIds() > 1)
+    OS << "  unsigned getHwMode() const override;\n";
+  OS << "};\n"
+     << "} // end namespace llvm\n\n";
 
   OS << "#endif // GET_SUBTARGETINFO_HEADER\n\n";
 
@@ -1517,6 +1536,7 @@ void SubtargetEmitter::run(raw_ostream &OS) {
   OS << ") {}\n\n";
 
   EmitSchedModelHelpers(ClassName, OS);
+  EmitHwModeCheck(ClassName, OS);
 
   OS << "} // end namespace llvm\n\n";
 

@@ -11,15 +11,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Object/ELFObjectFile.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Object/ELF.h"
-#include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ELFTypes.h"
 #include "llvm/Object/Error.h"
-#include "llvm/Support/ARMBuildAttributes.h"
 #include "llvm/Support/ARMAttributeParser.h"
-#include "llvm/Support/ELF.h"
+#include "llvm/Support/ARMBuildAttributes.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -260,8 +260,7 @@ void ELFObjectFileBase::setARMSubArch(Triple &TheTriple) const {
 
   std::string Triple;
   // Default to ARM, but use the triple if it's been set.
-  if (TheTriple.getArch() == Triple::thumb ||
-      TheTriple.getArch() == Triple::thumbeb)
+  if (TheTriple.isThumb())
     Triple = "thumb";
   else
     Triple = "arm";

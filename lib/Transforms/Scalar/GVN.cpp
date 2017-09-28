@@ -20,39 +20,63 @@
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/CFG.h"
-#include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/InstructionSimplify.h"
-#include "llvm/Analysis/Loads.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/Analysis/OptimizationDiagnosticInfo.h"
 #include "llvm/Analysis/PHITransAddr.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CallSite.h"
+#include "llvm/IR/Constant.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Dominators.h"
-#include "llvm/IR/GlobalVariable.h"
-#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Use.h"
+#include "llvm/IR/Value.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 #include "llvm/Transforms/Utils/VNCoercion.h"
-
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <utility>
 #include <vector>
+
 using namespace llvm;
 using namespace llvm::gvn;
 using namespace llvm::VNCoercion;
@@ -80,10 +104,10 @@ MaxRecurseDepth("max-recurse-depth", cl::Hidden, cl::init(1000), cl::ZeroOrMore,
 struct llvm::GVN::Expression {
   uint32_t opcode;
   Type *type;
-  bool commutative;
+  bool commutative = false;
   SmallVector<uint32_t, 4> varargs;
 
-  Expression(uint32_t o = ~2U) : opcode(o), commutative(false) {}
+  Expression(uint32_t o = ~2U) : opcode(o) {}
 
   bool operator==(const Expression &other) const {
     if (opcode != other.opcode)
@@ -105,20 +129,23 @@ struct llvm::GVN::Expression {
 };
 
 namespace llvm {
+
 template <> struct DenseMapInfo<GVN::Expression> {
   static inline GVN::Expression getEmptyKey() { return ~0U; }
-
   static inline GVN::Expression getTombstoneKey() { return ~1U; }
 
   static unsigned getHashValue(const GVN::Expression &e) {
     using llvm::hash_value;
+
     return static_cast<unsigned>(hash_value(e));
   }
+
   static bool isEqual(const GVN::Expression &LHS, const GVN::Expression &RHS) {
     return LHS == RHS;
   }
 };
-} // End llvm namespace.
+
+} // end namespace llvm
 
 /// Represents a particular available value that we know how to materialize.
 /// Materialization of an AvailableValue never fails.  An AvailableValue is
@@ -217,6 +244,7 @@ struct llvm::gvn::AvailableValueInBlock {
                                    unsigned Offset = 0) {
     return get(BB, AvailableValue::get(V, Offset));
   }
+
   static AvailableValueInBlock getUndef(BasicBlock *BB) {
     return get(BB, AvailableValue::getUndef());
   }
@@ -344,7 +372,7 @@ GVN::Expression GVN::ValueTable::createExtractvalueExpr(ExtractValueInst *EI) {
 //                     ValueTable External Functions
 //===----------------------------------------------------------------------===//
 
-GVN::ValueTable::ValueTable() : nextValueNumber(1) {}
+GVN::ValueTable::ValueTable() = default;
 GVN::ValueTable::ValueTable(const ValueTable &) = default;
 GVN::ValueTable::ValueTable(ValueTable &&) = default;
 GVN::ValueTable::~ValueTable() = default;
@@ -456,7 +484,6 @@ uint32_t GVN::ValueTable::lookupOrAddCall(CallInst *C) {
     uint32_t v = lookupOrAdd(cdep);
     valueNumbering[C] = v;
     return v;
-
   } else {
     valueNumbering[C] = nextValueNumber;
     return nextValueNumber++;
@@ -568,7 +595,6 @@ void GVN::ValueTable::clear() {
   expressionNumbering.clear();
   NumberingPhi.clear();
   PhiTranslateTable.clear();
-  BlockRPONumber.clear();
   nextValueNumber = 1;
   Expressions.clear();
   ExprIdx.clear();
@@ -620,7 +646,7 @@ PreservedAnalyses GVN::run(Function &F, FunctionAnalysisManager &AM) {
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
-LLVM_DUMP_METHOD void GVN::dump(DenseMap<uint32_t, Value*>& d) {
+LLVM_DUMP_METHOD void GVN::dump(DenseMap<uint32_t, Value*>& d) const {
   errs() << "{\n";
   for (DenseMap<uint32_t, Value*>::iterator I = d.begin(),
        E = d.end(); I != E; ++I) {
@@ -710,9 +736,6 @@ SpeculationFailure:
 
   return false;
 }
-
-
-
 
 /// Given a set of loads specified by ValuesPerBlock,
 /// construct SSA form, allowing us to eliminate LI.  This returns the value
@@ -807,6 +830,7 @@ static void reportMayClobberedLoad(LoadInst *LI, MemDepResult DepInfo,
                                    DominatorTree *DT,
                                    OptimizationRemarkEmitter *ORE) {
   using namespace ore;
+
   User *OtherAccess = nullptr;
 
   OptimizationRemarkMissed R(DEBUG_TYPE, "LoadClobbered", LI);
@@ -835,7 +859,6 @@ static void reportMayClobberedLoad(LoadInst *LI, MemDepResult DepInfo,
 
 bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
                                   Value *Address, AvailableValue &Res) {
-
   assert((DepInfo.isDef() || DepInfo.isClobber()) &&
          "expected a local dependence");
   assert(LI->isUnordered() && "rules below are incorrect for ordered access");
@@ -897,8 +920,7 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
       Instruction *I = DepInfo.getInst();
       dbgs() << " is clobbered by " << *I << '\n';
     );
-
-    if (ORE->allowExtraAnalysis())
+    if (ORE->allowExtraAnalysis(DEBUG_TYPE))
       reportMayClobberedLoad(LI, DepInfo, DT, ORE);
 
     return false;
@@ -967,7 +989,6 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
 void GVN::AnalyzeLoadAvailability(LoadInst *LI, LoadDepVect &Deps,
                                   AvailValInBlkVect &ValuesPerBlock,
                                   UnavailBlkVect &UnavailableBlocks) {
-
   // Filter out useless results (non-locals, etc).  Keep track of the blocks
   // where we have a value available in repl, also keep track of whether we see
   // dependencies that produce an unknown value for the load (such as a call
@@ -1184,8 +1205,9 @@ bool GVN::PerformLoadPRE(LoadInst *LI, AvailValInBlkVect &ValuesPerBlock,
 
     auto *NewLoad = new LoadInst(LoadPtr, LI->getName()+".pre",
                                  LI->isVolatile(), LI->getAlignment(),
-                                 LI->getOrdering(), LI->getSynchScope(),
+                                 LI->getOrdering(), LI->getSyncScopeID(),
                                  UnavailablePred->getTerminator());
+    NewLoad->setDebugLoc(LI->getDebugLoc());
 
     // Transfer the old load's AA tags to the new load.
     AAMDNodes Tags;
@@ -1220,7 +1242,7 @@ bool GVN::PerformLoadPRE(LoadInst *LI, AvailValInBlkVect &ValuesPerBlock,
     V->takeName(LI);
   if (Instruction *I = dyn_cast<Instruction>(V))
     I->setDebugLoc(LI->getDebugLoc());
-  if (V->getType()->getScalarType()->isPointerTy())
+  if (V->getType()->isPtrOrPtrVectorTy())
     MD->invalidateCachedPointerInfo(V);
   markInstructionForDeletion(LI);
   ORE->emit(OptimizationRemark(DEBUG_TYPE, "LoadPRE", LI)
@@ -1232,6 +1254,7 @@ bool GVN::PerformLoadPRE(LoadInst *LI, AvailValInBlkVect &ValuesPerBlock,
 static void reportLoadElim(LoadInst *LI, Value *AvailableValue,
                            OptimizationRemarkEmitter *ORE) {
   using namespace ore;
+
   ORE->emit(OptimizationRemark(DEBUG_TYPE, "LoadElim", LI)
             << "load of type " << NV("Type", LI->getType()) << " eliminated"
             << setExtraArgs() << " in favor of "
@@ -1307,7 +1330,7 @@ bool GVN::processNonLocalLoad(LoadInst *LI) {
       // to propagate LI's DebugLoc because LI may not post-dominate I.
       if (LI->getDebugLoc() && LI->getParent() == I->getParent())
         I->setDebugLoc(LI->getDebugLoc());
-    if (V->getType()->getScalarType()->isPointerTy())
+    if (V->getType()->isPtrOrPtrVectorTy())
       MD->invalidateCachedPointerInfo(V);
     markInstructionForDeletion(LI);
     ++NumGVNLoad;
@@ -1461,7 +1484,7 @@ bool GVN::processLoad(LoadInst *L) {
     reportLoadElim(L, AvailableValue, ORE);
     // Tell MDA to rexamine the reused pointer since we might have more
     // information after forwarding it.
-    if (MD && AvailableValue->getType()->getScalarType()->isPointerTy())
+    if (MD && AvailableValue->getType()->isPtrOrPtrVectorTy())
       MD->invalidateCachedPointerInfo(AvailableValue);
     return true;
   }
@@ -1483,13 +1506,6 @@ GVN::ValueTable::assignExpNewValueNum(Expression &Exp) {
     ExprIdx[nextValueNumber++] = nextExprNumber++;
   }
   return {e, CreateNewValNum};
-}
-
-void GVN::ValueTable::assignBlockRPONumber(Function &F) {
-  uint32_t NextBlockNumber = 1;
-  ReversePostOrderTraversal<Function *> RPOT(&F);
-  for (BasicBlock *BB : RPOT)
-    BlockRPONumber[BB] = NextBlockNumber++;
 }
 
 /// Return whether all the values related with the same \p num are
@@ -1520,8 +1536,6 @@ uint32_t GVN::ValueTable::phiTranslateImpl(const BasicBlock *Pred,
                                            const BasicBlock *PhiBlock,
                                            uint32_t Num, GVN &Gvn) {
   if (PHINode *PN = NumberingPhi[Num]) {
-    if (BlockRPONumber[Pred] >= BlockRPONumber[PhiBlock])
-      return Num;
     for (unsigned i = 0; i != PN->getNumIncomingValues(); ++i) {
       if (PN->getParent() == PhiBlock && PN->getIncomingBlock(i) == Pred)
         if (uint32_t TransVal = lookup(PN->getIncomingValue(i), false))
@@ -1536,7 +1550,7 @@ uint32_t GVN::ValueTable::phiTranslateImpl(const BasicBlock *Pred,
   if (!areAllValsInBB(Num, PhiBlock, Gvn))
     return Num;
 
-  if (ExprIdx[Num] == 0 || Num >= ExprIdx.size())
+  if (Num >= ExprIdx.size() || ExprIdx[Num] == 0)
     return Num;
   Expression Exp = Expressions[ExprIdx[Num]];
 
@@ -1565,6 +1579,17 @@ uint32_t GVN::ValueTable::phiTranslateImpl(const BasicBlock *Pred,
   if (uint32_t NewNum = expressionNumbering[Exp])
     return NewNum;
   return Num;
+}
+
+/// Erase stale entry from phiTranslate cache so phiTranslate can be computed
+/// again.
+void GVN::ValueTable::eraseTranslateCacheEntry(uint32_t Num,
+                                               const BasicBlock &CurrBlock) {
+  for (const BasicBlock *Pred : predecessors(&CurrBlock)) {
+    auto FindRes = PhiTranslateTable.find({Num, Pred});
+    if (FindRes != PhiTranslateTable.end())
+      PhiTranslateTable.erase(FindRes);
+  }
 }
 
 // In order to find a leader for a given value number at a
@@ -1609,6 +1634,13 @@ static bool isOnlyReachableViaThisEdge(const BasicBlockEdge &E,
   assert((!Pred || Pred == E.getStart()) &&
          "No edge between these basic blocks!");
   return Pred != nullptr;
+}
+
+void GVN::assignBlockRPONumber(Function &F) {
+  uint32_t NextBlockNumber = 1;
+  ReversePostOrderTraversal<Function *> RPOT(&F);
+  for (BasicBlock *BB : RPOT)
+    BlockRPONumber[BB] = NextBlockNumber++;
 }
 
 // Tries to replace instruction with const, using information from
@@ -1714,7 +1746,7 @@ bool GVN::propagateEquality(Value *LHS, Value *RHS, const BasicBlockEdge &Root,
       // RHS neither 'true' nor 'false' - bail out.
       continue;
     // Whether RHS equals 'true'.  Otherwise it equals 'false'.
-    bool isKnownTrue = CI->isAllOnesValue();
+    bool isKnownTrue = CI->isMinusOne();
     bool isKnownFalse = !isKnownTrue;
 
     // If "A && B" is known true then both A and B are known true.  If "A || B"
@@ -1814,7 +1846,7 @@ bool GVN::processInstruction(Instruction *I) {
       Changed = true;
     }
     if (Changed) {
-      if (MD && V->getType()->getScalarType()->isPointerTy())
+      if (MD && V->getType()->isPtrOrPtrVectorTy())
         MD->invalidateCachedPointerInfo(V);
       ++NumGVNSimpl;
       return true;
@@ -1925,7 +1957,7 @@ bool GVN::processInstruction(Instruction *I) {
 
   // Remove it!
   patchAndReplaceAllUsesWith(I, Repl);
-  if (MD && Repl->getType()->getScalarType()->isPointerTy())
+  if (MD && Repl->getType()->isPtrOrPtrVectorTy())
     MD->invalidateCachedPointerInfo(Repl);
   markInstructionForDeletion(I);
   return true;
@@ -1972,7 +2004,7 @@ bool GVN::runImpl(Function &F, AssumptionCache &RunAC, DominatorTree &RunDT,
     // Fabricate val-num for dead-code in order to suppress assertion in
     // performPRE().
     assignValNumForDeadCode();
-    VN.assignBlockRPONumber(F);
+    assignBlockRPONumber(F);
     bool PREChanged = true;
     while (PREChanged) {
       PREChanged = performPRE(F);
@@ -2044,7 +2076,7 @@ bool GVN::processBlock(BasicBlock *BB) {
 
 // Instantiate an expression in a predecessor that lacked it.
 bool GVN::performScalarPREInsertion(Instruction *Instr, BasicBlock *Pred,
-                                    unsigned int ValNo) {
+                                    BasicBlock *Curr, unsigned int ValNo) {
   // Because we are going top-down through the block, all value numbers
   // will be available in the predecessor by the time we need them.  Any
   // that weren't originally present will have been instantiated earlier
@@ -2063,7 +2095,7 @@ bool GVN::performScalarPREInsertion(Instruction *Instr, BasicBlock *Pred,
       break;
     }
     uint32_t TValNo =
-        VN.phiTranslate(Pred, Instr->getParent(), VN.lookup(Op), *this);
+        VN.phiTranslate(Pred, Curr, VN.lookup(Op), *this);
     if (Value *V = findLeader(Pred, TValNo)) {
       Instr->setOperand(i, V);
     } else {
@@ -2124,13 +2156,21 @@ bool GVN::performScalarPRE(Instruction *CurInst) {
 
   SmallVector<std::pair<Value *, BasicBlock *>, 8> predMap;
   for (BasicBlock *P : predecessors(CurrentBlock)) {
-    // We're not interested in PRE where the block is its
-    // own predecessor, or in blocks with predecessors
-    // that are not reachable.
-    if (P == CurrentBlock) {
+    // We're not interested in PRE where blocks with predecessors that are
+    // not reachable.
+    if (!DT->isReachableFromEntry(P)) {
       NumWithout = 2;
       break;
-    } else if (!DT->isReachableFromEntry(P)) {
+    }
+    // It is not safe to do PRE when P->CurrentBlock is a loop backedge, and
+    // when CurInst has operand defined in CurrentBlock (so it may be defined
+    // by phi in the loop header).
+    if (BlockRPONumber[P] >= BlockRPONumber[CurrentBlock] &&
+        llvm::any_of(CurInst->operands(), [&](const Use &U) {
+          if (auto *Inst = dyn_cast<Instruction>(U.get()))
+            return Inst->getParent() == CurrentBlock;
+          return false;
+        })) {
       NumWithout = 2;
       break;
     }
@@ -2176,7 +2216,7 @@ bool GVN::performScalarPRE(Instruction *CurInst) {
     }
     // We need to insert somewhere, so let's give it a shot
     PREInstr = CurInst->clone();
-    if (!performScalarPREInsertion(PREInstr, PREPred, ValNo)) {
+    if (!performScalarPREInsertion(PREInstr, PREPred, CurrentBlock, ValNo)) {
       // If we failed insertion, make sure we remove the instruction.
       DEBUG(verifyRemoved(PREInstr));
       PREInstr->deleteValue();
@@ -2186,7 +2226,7 @@ bool GVN::performScalarPRE(Instruction *CurInst) {
 
   // Either we should have filled in the PRE instruction, or we should
   // not have needed insertions.
-  assert (PREInstr != nullptr || NumWithout == 0);
+  assert(PREInstr != nullptr || NumWithout == 0);
 
   ++NumGVNPRE;
 
@@ -2202,10 +2242,13 @@ bool GVN::performScalarPRE(Instruction *CurInst) {
   }
 
   VN.add(Phi, ValNo);
+  // After creating a new PHI for ValNo, the phi translate result for ValNo will
+  // be changed, so erase the related stale entries in phi translate cache.
+  VN.eraseTranslateCacheEntry(ValNo, *CurrentBlock);
   addToLeaderTable(ValNo, Phi, CurrentBlock);
   Phi->setDebugLoc(CurInst->getDebugLoc());
   CurInst->replaceAllUsesWith(Phi);
-  if (MD && Phi->getType()->getScalarType()->isPointerTy())
+  if (MD && Phi->getType()->isPtrOrPtrVectorTy())
     MD->invalidateCachedPointerInfo(Phi);
   VN.erase(CurInst);
   removeFromLeaderTable(ValNo, CurInst, CurrentBlock);
@@ -2290,6 +2333,7 @@ bool GVN::iterateOnFunction(Function &F) {
 void GVN::cleanupGlobalSets() {
   VN.clear();
   LeaderTable.clear();
+  BlockRPONumber.clear();
   TableAllocator.Reset();
 }
 
@@ -2438,6 +2482,7 @@ void GVN::assignValNumForDeadCode() {
 class llvm::gvn::GVNLegacyPass : public FunctionPass {
 public:
   static char ID; // Pass identification, replacement for typeid
+
   explicit GVNLegacyPass(bool NoLoads = false)
       : FunctionPass(ID), NoLoads(NoLoads) {
     initializeGVNLegacyPassPass(*PassRegistry::getPassRegistry());
@@ -2481,11 +2526,6 @@ private:
 
 char GVNLegacyPass::ID = 0;
 
-// The public interface to this file...
-FunctionPass *llvm::createGVNPass(bool NoLoads) {
-  return new GVNLegacyPass(NoLoads);
-}
-
 INITIALIZE_PASS_BEGIN(GVNLegacyPass, "gvn", "Global Value Numbering", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(MemoryDependenceWrapperPass)
@@ -2495,3 +2535,8 @@ INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(OptimizationRemarkEmitterWrapperPass)
 INITIALIZE_PASS_END(GVNLegacyPass, "gvn", "Global Value Numbering", false, false)
+
+// The public interface to this file...
+FunctionPass *llvm::createGVNPass(bool NoLoads) {
+  return new GVNLegacyPass(NoLoads);
+}

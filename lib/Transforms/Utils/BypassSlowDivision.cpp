@@ -30,15 +30,6 @@ using namespace llvm;
 #define DEBUG_TYPE "bypass-slow-division"
 
 namespace {
-  struct DivOpInfo {
-    bool SignedOp;
-    Value *Dividend;
-    Value *Divisor;
-
-    DivOpInfo(bool InSignedOp, Value *InDividend, Value *InDivisor)
-      : SignedOp(InSignedOp), Dividend(InDividend), Divisor(InDivisor) {}
-  };
-
   struct QuotRemPair {
     Value *Quotient;
     Value *Remainder;
@@ -58,30 +49,7 @@ namespace {
 }
 
 namespace llvm {
-  template<>
-  struct DenseMapInfo<DivOpInfo> {
-    static bool isEqual(const DivOpInfo &Val1, const DivOpInfo &Val2) {
-      return Val1.SignedOp == Val2.SignedOp &&
-             Val1.Dividend == Val2.Dividend &&
-             Val1.Divisor == Val2.Divisor;
-    }
-
-    static DivOpInfo getEmptyKey() {
-      return DivOpInfo(false, nullptr, nullptr);
-    }
-
-    static DivOpInfo getTombstoneKey() {
-      return DivOpInfo(true, nullptr, nullptr);
-    }
-
-    static unsigned getHashValue(const DivOpInfo &Val) {
-      return (unsigned)(reinterpret_cast<uintptr_t>(Val.Dividend) ^
-                        reinterpret_cast<uintptr_t>(Val.Divisor)) ^
-                        (unsigned)Val.SignedOp;
-    }
-  };
-
-  typedef DenseMap<DivOpInfo, QuotRemPair> DivCacheTy;
+  typedef DenseMap<DivRemMapKey, QuotRemPair> DivCacheTy;
   typedef DenseMap<unsigned, unsigned> BypassWidthsTy;
   typedef SmallPtrSet<Instruction *, 4> VisitedSetTy;
 }
@@ -175,7 +143,7 @@ Value *FastDivInsertionTask::getReplacement(DivCacheTy &Cache) {
   // Then, look for a value in Cache.
   Value *Dividend = SlowDivOrRem->getOperand(0);
   Value *Divisor = SlowDivOrRem->getOperand(1);
-  DivOpInfo Key(isSignedOp(), Dividend, Divisor);
+  DivRemMapKey Key(isSignedOp(), Dividend, Divisor);
   auto CacheI = Cache.find(Key);
 
   if (CacheI == Cache.end()) {
@@ -371,11 +339,6 @@ Optional<QuotRemPair> FastDivInsertionTask::insertFastDivAndRem() {
   Value *Dividend = SlowDivOrRem->getOperand(0);
   Value *Divisor = SlowDivOrRem->getOperand(1);
 
-  if (isa<ConstantInt>(Divisor)) {
-    // Keep division by a constant for DAGCombiner.
-    return None;
-  }
-
   VisitedSetTy SetL;
   ValueRange DividendRange = getValueRange(Dividend, SetL);
   if (DividendRange == VALRNG_LIKELY_LONG)
@@ -391,7 +354,9 @@ Optional<QuotRemPair> FastDivInsertionTask::insertFastDivAndRem() {
 
   if (DividendShort && DivisorShort) {
     // If both operands are known to be short then just replace the long
-    // division with a short one in-place.
+    // division with a short one in-place.  Since we're not introducing control
+    // flow in this case, narrowing the division is always a win, even if the
+    // divisor is a constant (and will later get replaced by a multiplication).
 
     IRBuilder<> Builder(SlowDivOrRem);
     Value *TruncDividend = Builder.CreateTrunc(Dividend, BypassType);
@@ -401,7 +366,16 @@ Optional<QuotRemPair> FastDivInsertionTask::insertFastDivAndRem() {
     Value *ExtDiv = Builder.CreateZExt(TruncDiv, getSlowType());
     Value *ExtRem = Builder.CreateZExt(TruncRem, getSlowType());
     return QuotRemPair(ExtDiv, ExtRem);
-  } else if (DividendShort && !isSignedOp()) {
+  }
+
+  if (isa<ConstantInt>(Divisor)) {
+    // If the divisor is not a constant, DAGCombiner will convert it to a
+    // multiplication by a magic constant.  It isn't clear if it is worth
+    // introducing control flow to get a narrower multiply.
+    return None;
+  }
+
+  if (DividendShort && !isSignedOp()) {
     // If the division is unsigned and Dividend is known to be short, then
     // either
     // 1) Divisor is less or equal to Dividend, and the result can be computed

@@ -12,9 +12,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "X86IntelInstPrinter.h"
 #include "MCTargetDesc/X86BaseInfo.h"
 #include "X86InstComments.h"
-#include "X86IntelInstPrinter.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrDesc.h"
@@ -152,6 +152,7 @@ void X86IntelInstPrinter::printOperand(const MCInst *MI, unsigned OpNo,
     O << formatImm((int64_t)Op.getImm());
   } else {
     assert(Op.isExpr() && "unknown operand kind in printOperand");
+    O << "offset ";
     Op.getExpr()->print(O, &MAI);
   }
 }

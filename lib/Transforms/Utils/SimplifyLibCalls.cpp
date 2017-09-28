@@ -18,10 +18,11 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/Analysis/OptimizationDiagnosticInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -83,20 +84,6 @@ static bool isCallingConvCCompatible(CallInst *CI) {
   }
   }
   return false;
-}
-
-/// Return true if it only matters that the value is equal or not-equal to zero.
-static bool isOnlyUsedInZeroEqualityComparison(Value *V) {
-  for (User *U : V->users()) {
-    if (ICmpInst *IC = dyn_cast<ICmpInst>(U))
-      if (IC->isEquality())
-        if (Constant *C = dyn_cast<Constant>(IC->getOperand(1)))
-          if (C->isNullValue())
-            continue;
-    // Unknown instruction.
-    return false;
-  }
-  return true;
 }
 
 /// Return true if it is only used in equality comparisons with With.
@@ -498,10 +485,8 @@ Value *LibCallSimplifier::optimizeStringLength(CallInst *CI, IRBuilder<> &B,
     uint64_t LenTrue = GetStringLength(SI->getTrueValue(), CharSize);
     uint64_t LenFalse = GetStringLength(SI->getFalseValue(), CharSize);
     if (LenTrue && LenFalse) {
-      Function *Caller = CI->getParent()->getParent();
-      emitOptimizationRemark(CI->getContext(), "simplify-libcalls", *Caller,
-                             SI->getDebugLoc(),
-                             "folded strlen(select) to select of constants");
+      ORE.emit(OptimizationRemark("instcombine", "simplify-libcalls", CI)
+               << "folded strlen(select) to select of constants");
       return B.CreateSelect(SI->getCondition(),
                             ConstantInt::get(CI->getType(), LenTrue - 1),
                             ConstantInt::get(CI->getType(), LenFalse - 1));
@@ -523,6 +508,9 @@ Value *LibCallSimplifier::optimizeStrLen(CallInst *CI, IRBuilder<> &B) {
 Value *LibCallSimplifier::optimizeWcslen(CallInst *CI, IRBuilder<> &B) {
   Module &M = *CI->getParent()->getParent()->getParent();
   unsigned WCharSize = TLI->getWCharSize(M) * 8;
+  // We cannot perform this optimization without wchar_size metadata.
+  if (WCharSize == 0)
+    return nullptr;
 
   return optimizeStringLength(CI, B, WCharSize);
 }
@@ -670,7 +658,7 @@ Value *LibCallSimplifier::optimizeMemChr(CallInst *CI, IRBuilder<> &B) {
   ConstantInt *LenC = dyn_cast<ConstantInt>(CI->getArgOperand(2));
 
   // memchr(x, y, 0) -> null
-  if (LenC && LenC->isNullValue())
+  if (LenC && LenC->isZero())
     return Constant::getNullValue(CI->getType());
 
   // From now on we need at least constant length and string.
@@ -752,8 +740,8 @@ Value *LibCallSimplifier::optimizeMemCmp(CallInst *CI, IRBuilder<> &B) {
   ConstantInt *LenC = dyn_cast<ConstantInt>(CI->getArgOperand(2));
   if (!LenC)
     return nullptr;
-  uint64_t Len = LenC->getZExtValue();
 
+  uint64_t Len = LenC->getZExtValue();
   if (Len == 0) // memcmp(s1,s2,0) -> 0
     return Constant::getNullValue(CI->getType());
 
@@ -767,29 +755,44 @@ Value *LibCallSimplifier::optimizeMemCmp(CallInst *CI, IRBuilder<> &B) {
   }
 
   // memcmp(S1,S2,N/8)==0 -> (*(intN_t*)S1 != *(intN_t*)S2)==0
+  // TODO: The case where both inputs are constants does not need to be limited
+  // to legal integers or equality comparison. See block below this.
   if (DL.isLegalInteger(Len * 8) && isOnlyUsedInZeroEqualityComparison(CI)) {
-
     IntegerType *IntType = IntegerType::get(CI->getContext(), Len * 8);
     unsigned PrefAlignment = DL.getPrefTypeAlignment(IntType);
 
-    if (getKnownAlignment(LHS, DL, CI) >= PrefAlignment &&
-        getKnownAlignment(RHS, DL, CI) >= PrefAlignment) {
+    // First, see if we can fold either argument to a constant.
+    Value *LHSV = nullptr;
+    if (auto *LHSC = dyn_cast<Constant>(LHS)) {
+      LHSC = ConstantExpr::getBitCast(LHSC, IntType->getPointerTo());
+      LHSV = ConstantFoldLoadFromConstPtr(LHSC, IntType, DL);
+    }
+    Value *RHSV = nullptr;
+    if (auto *RHSC = dyn_cast<Constant>(RHS)) {
+      RHSC = ConstantExpr::getBitCast(RHSC, IntType->getPointerTo());
+      RHSV = ConstantFoldLoadFromConstPtr(RHSC, IntType, DL);
+    }
 
-      Type *LHSPtrTy =
-          IntType->getPointerTo(LHS->getType()->getPointerAddressSpace());
-      Type *RHSPtrTy =
-          IntType->getPointerTo(RHS->getType()->getPointerAddressSpace());
-
-      Value *LHSV =
-          B.CreateLoad(B.CreateBitCast(LHS, LHSPtrTy, "lhsc"), "lhsv");
-      Value *RHSV =
-          B.CreateLoad(B.CreateBitCast(RHS, RHSPtrTy, "rhsc"), "rhsv");
-
+    // Don't generate unaligned loads. If either source is constant data,
+    // alignment doesn't matter for that source because there is no load.
+    if ((LHSV || getKnownAlignment(LHS, DL, CI) >= PrefAlignment) &&
+        (RHSV || getKnownAlignment(RHS, DL, CI) >= PrefAlignment)) {
+      if (!LHSV) {
+        Type *LHSPtrTy =
+            IntType->getPointerTo(LHS->getType()->getPointerAddressSpace());
+        LHSV = B.CreateLoad(B.CreateBitCast(LHS, LHSPtrTy), "lhsv");
+      }
+      if (!RHSV) {
+        Type *RHSPtrTy =
+            IntType->getPointerTo(RHS->getType()->getPointerAddressSpace());
+        RHSV = B.CreateLoad(B.CreateBitCast(RHS, RHSPtrTy), "rhsv");
+      }
       return B.CreateZExt(B.CreateICmpNE(LHSV, RHSV), CI->getType(), "memcmp");
     }
   }
 
-  // Constant folding: memcmp(x, y, l) -> cnst (all arguments are constant)
+  // Constant folding: memcmp(x, y, Len) -> constant (all arguments are const).
+  // TODO: This is limited to i8 arrays.
   StringRef LHSStr, RHSStr;
   if (getConstantStringInfo(LHS, LHSStr) &&
       getConstantStringInfo(RHS, RHSStr)) {
@@ -2057,13 +2060,103 @@ Value *LibCallSimplifier::optimizeStringMemoryLibCall(CallInst *CI,
   return nullptr;
 }
 
+Value *LibCallSimplifier::optimizeFloatingPointLibCall(CallInst *CI,
+                                                       LibFunc Func,
+                                                       IRBuilder<> &Builder) {
+  // Don't optimize calls that require strict floating point semantics.
+  if (CI->isStrictFP())
+    return nullptr;
+
+  switch (Func) {
+  case LibFunc_cosf:
+  case LibFunc_cos:
+  case LibFunc_cosl:
+    return optimizeCos(CI, Builder);
+  case LibFunc_sinpif:
+  case LibFunc_sinpi:
+  case LibFunc_cospif:
+  case LibFunc_cospi:
+    return optimizeSinCosPi(CI, Builder);
+  case LibFunc_powf:
+  case LibFunc_pow:
+  case LibFunc_powl:
+    return optimizePow(CI, Builder);
+  case LibFunc_exp2l:
+  case LibFunc_exp2:
+  case LibFunc_exp2f:
+    return optimizeExp2(CI, Builder);
+  case LibFunc_fabsf:
+  case LibFunc_fabs:
+  case LibFunc_fabsl:
+    return replaceUnaryCall(CI, Builder, Intrinsic::fabs);
+  case LibFunc_sqrtf:
+  case LibFunc_sqrt:
+  case LibFunc_sqrtl:
+    return optimizeSqrt(CI, Builder);
+  case LibFunc_log:
+  case LibFunc_log10:
+  case LibFunc_log1p:
+  case LibFunc_log2:
+  case LibFunc_logb:
+    return optimizeLog(CI, Builder);
+  case LibFunc_tan:
+  case LibFunc_tanf:
+  case LibFunc_tanl:
+    return optimizeTan(CI, Builder);
+  case LibFunc_ceil:
+    return replaceUnaryCall(CI, Builder, Intrinsic::ceil);
+  case LibFunc_floor:
+    return replaceUnaryCall(CI, Builder, Intrinsic::floor);
+  case LibFunc_round:
+    return replaceUnaryCall(CI, Builder, Intrinsic::round);
+  case LibFunc_nearbyint:
+    return replaceUnaryCall(CI, Builder, Intrinsic::nearbyint);
+  case LibFunc_rint:
+    return replaceUnaryCall(CI, Builder, Intrinsic::rint);
+  case LibFunc_trunc:
+    return replaceUnaryCall(CI, Builder, Intrinsic::trunc);
+  case LibFunc_acos:
+  case LibFunc_acosh:
+  case LibFunc_asin:
+  case LibFunc_asinh:
+  case LibFunc_atan:
+  case LibFunc_atanh:
+  case LibFunc_cbrt:
+  case LibFunc_cosh:
+  case LibFunc_exp:
+  case LibFunc_exp10:
+  case LibFunc_expm1:
+  case LibFunc_sin:
+  case LibFunc_sinh:
+  case LibFunc_tanh:
+    if (UnsafeFPShrink && hasFloatVersion(CI->getCalledFunction()->getName()))
+      return optimizeUnaryDoubleFP(CI, Builder, true);
+    return nullptr;
+  case LibFunc_copysign:
+    if (hasFloatVersion(CI->getCalledFunction()->getName()))
+      return optimizeBinaryDoubleFP(CI, Builder);
+    return nullptr;
+  case LibFunc_fminf:
+  case LibFunc_fmin:
+  case LibFunc_fminl:
+  case LibFunc_fmaxf:
+  case LibFunc_fmax:
+  case LibFunc_fmaxl:
+    return optimizeFMinFMax(CI, Builder);
+  default:
+    return nullptr;
+  }
+}
+
 Value *LibCallSimplifier::optimizeCall(CallInst *CI) {
+  // TODO: Split out the code below that operates on FP calls so that
+  //       we can all non-FP calls with the StrictFP attribute to be
+  //       optimized.
   if (CI->isNoBuiltin())
     return nullptr;
 
   LibFunc Func;
   Function *Callee = CI->getCalledFunction();
-  StringRef FuncName = Callee->getName();
 
   SmallVector<OperandBundleDef, 2> OpBundles;
   CI->getOperandBundlesAsDefs(OpBundles);
@@ -2071,6 +2164,8 @@ Value *LibCallSimplifier::optimizeCall(CallInst *CI) {
   bool isCallingConvC = isCallingConvCCompatible(CI);
 
   // Command-line parameter overrides instruction attribute.
+  // This can't be moved to optimizeFloatingPointLibCall() because it may be
+  // used by the intrinsic optimizations. 
   if (EnableUnsafeFPShrink.getNumOccurrences() > 0)
     UnsafeFPShrink = EnableUnsafeFPShrink;
   else if (isa<FPMathOperator>(CI) && CI->hasUnsafeAlgebra())
@@ -2080,6 +2175,8 @@ Value *LibCallSimplifier::optimizeCall(CallInst *CI) {
   if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(CI)) {
     if (!isCallingConvC)
       return nullptr;
+    // The FP intrinsics have corresponding constrained versions so we don't
+    // need to check for the StrictFP attribute here.
     switch (II->getIntrinsicID()) {
     case Intrinsic::pow:
       return optimizePow(CI, Builder);
@@ -2120,32 +2217,9 @@ Value *LibCallSimplifier::optimizeCall(CallInst *CI) {
       return nullptr;
     if (Value *V = optimizeStringMemoryLibCall(CI, Builder))
       return V;
+    if (Value *V = optimizeFloatingPointLibCall(CI, Func, Builder))
+      return V;
     switch (Func) {
-    case LibFunc_cosf:
-    case LibFunc_cos:
-    case LibFunc_cosl:
-      return optimizeCos(CI, Builder);
-    case LibFunc_sinpif:
-    case LibFunc_sinpi:
-    case LibFunc_cospif:
-    case LibFunc_cospi:
-      return optimizeSinCosPi(CI, Builder);
-    case LibFunc_powf:
-    case LibFunc_pow:
-    case LibFunc_powl:
-      return optimizePow(CI, Builder);
-    case LibFunc_exp2l:
-    case LibFunc_exp2:
-    case LibFunc_exp2f:
-      return optimizeExp2(CI, Builder);
-    case LibFunc_fabsf:
-    case LibFunc_fabs:
-    case LibFunc_fabsl:
-      return replaceUnaryCall(CI, Builder, Intrinsic::fabs);
-    case LibFunc_sqrtf:
-    case LibFunc_sqrt:
-    case LibFunc_sqrtl:
-      return optimizeSqrt(CI, Builder);
     case LibFunc_ffs:
     case LibFunc_ffsl:
     case LibFunc_ffsll:
@@ -2174,18 +2248,8 @@ Value *LibCallSimplifier::optimizeCall(CallInst *CI) {
       return optimizeFWrite(CI, Builder);
     case LibFunc_fputs:
       return optimizeFPuts(CI, Builder);
-    case LibFunc_log:
-    case LibFunc_log10:
-    case LibFunc_log1p:
-    case LibFunc_log2:
-    case LibFunc_logb:
-      return optimizeLog(CI, Builder);
     case LibFunc_puts:
       return optimizePuts(CI, Builder);
-    case LibFunc_tan:
-    case LibFunc_tanf:
-    case LibFunc_tanl:
-      return optimizeTan(CI, Builder);
     case LibFunc_perror:
       return optimizeErrorReporting(CI, Builder);
     case LibFunc_vfprintf:
@@ -2193,46 +2257,6 @@ Value *LibCallSimplifier::optimizeCall(CallInst *CI) {
       return optimizeErrorReporting(CI, Builder, 0);
     case LibFunc_fputc:
       return optimizeErrorReporting(CI, Builder, 1);
-    case LibFunc_ceil:
-      return replaceUnaryCall(CI, Builder, Intrinsic::ceil);
-    case LibFunc_floor:
-      return replaceUnaryCall(CI, Builder, Intrinsic::floor);
-    case LibFunc_round:
-      return replaceUnaryCall(CI, Builder, Intrinsic::round);
-    case LibFunc_nearbyint:
-      return replaceUnaryCall(CI, Builder, Intrinsic::nearbyint);
-    case LibFunc_rint:
-      return replaceUnaryCall(CI, Builder, Intrinsic::rint);
-    case LibFunc_trunc:
-      return replaceUnaryCall(CI, Builder, Intrinsic::trunc);
-    case LibFunc_acos:
-    case LibFunc_acosh:
-    case LibFunc_asin:
-    case LibFunc_asinh:
-    case LibFunc_atan:
-    case LibFunc_atanh:
-    case LibFunc_cbrt:
-    case LibFunc_cosh:
-    case LibFunc_exp:
-    case LibFunc_exp10:
-    case LibFunc_expm1:
-    case LibFunc_sin:
-    case LibFunc_sinh:
-    case LibFunc_tanh:
-      if (UnsafeFPShrink && hasFloatVersion(FuncName))
-        return optimizeUnaryDoubleFP(CI, Builder, true);
-      return nullptr;
-    case LibFunc_copysign:
-      if (hasFloatVersion(FuncName))
-        return optimizeBinaryDoubleFP(CI, Builder);
-      return nullptr;
-    case LibFunc_fminf:
-    case LibFunc_fmin:
-    case LibFunc_fminl:
-    case LibFunc_fmaxf:
-    case LibFunc_fmax:
-    case LibFunc_fmaxl:
-      return optimizeFMinFMax(CI, Builder);
     default:
       return nullptr;
     }
@@ -2242,9 +2266,10 @@ Value *LibCallSimplifier::optimizeCall(CallInst *CI) {
 
 LibCallSimplifier::LibCallSimplifier(
     const DataLayout &DL, const TargetLibraryInfo *TLI,
+    OptimizationRemarkEmitter &ORE,
     function_ref<void(Instruction *, Value *)> Replacer)
-    : FortifiedSimplifier(TLI), DL(DL), TLI(TLI), UnsafeFPShrink(false),
-      Replacer(Replacer) {}
+    : FortifiedSimplifier(TLI), DL(DL), TLI(TLI), ORE(ORE),
+      UnsafeFPShrink(false), Replacer(Replacer) {}
 
 void LibCallSimplifier::replaceAllUsesWith(Instruction *I, Value *With) {
   // Indirect through the replacer used in this instance.
@@ -2294,7 +2319,7 @@ bool FortifiedLibCallSimplifier::isFortifiedCallFoldable(CallInst *CI,
     return true;
   if (ConstantInt *ObjSizeCI =
           dyn_cast<ConstantInt>(CI->getArgOperand(ObjSizeOp))) {
-    if (ObjSizeCI->isAllOnesValue())
+    if (ObjSizeCI->isMinusOne())
       return true;
     // If the object size wasn't -1 (unknown), bail out if we were asked to.
     if (OnlyLowerUnknownSize)

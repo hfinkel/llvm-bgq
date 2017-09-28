@@ -56,8 +56,8 @@ using ValueOfRange = typename std::remove_reference<decltype(
 //     Extra additions to <functional>
 //===----------------------------------------------------------------------===//
 
-template<class Ty>
-struct identity : public std::unary_function<Ty, Ty> {
+template <class Ty> struct identity {
+  using argument_type = Ty;
   Ty &operator()(Ty &self) const {
     return self;
   }
@@ -66,15 +66,13 @@ struct identity : public std::unary_function<Ty, Ty> {
   }
 };
 
-template<class Ty>
-struct less_ptr : public std::binary_function<Ty, Ty, bool> {
+template <class Ty> struct less_ptr {
   bool operator()(const Ty* left, const Ty* right) const {
     return *left < *right;
   }
 };
 
-template<class Ty>
-struct greater_ptr : public std::binary_function<Ty, Ty, bool> {
+template <class Ty> struct greater_ptr {
   bool operator()(const Ty* left, const Ty* right) const {
     return *right < *left;
   }
@@ -100,6 +98,8 @@ class function_ref<Ret(Params...)> {
   }
 
 public:
+  function_ref() : callback(nullptr) {}
+
   template <typename Callable>
   function_ref(Callable &&callable,
                typename std::enable_if<
@@ -110,6 +110,8 @@ public:
   Ret operator()(Params ...params) const {
     return callback(callable, std::forward<Params>(params)...);
   }
+
+  operator bool() const { return callback; }
 };
 
 // deleter - Very very very simple method that is used to invoke operator

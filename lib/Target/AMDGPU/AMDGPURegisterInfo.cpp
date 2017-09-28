@@ -40,7 +40,6 @@ unsigned AMDGPURegisterInfo::getSubRegFromChannel(unsigned Channel) const {
 #define GET_REGINFO_TARGET_DESC
 #include "AMDGPUGenRegisterInfo.inc"
 
-
 // Forced to be here by one .inc
 const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
   const MachineFunction *MF) const {
@@ -48,6 +47,7 @@ const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
   switch (CC) {
   case CallingConv::C:
   case CallingConv::Fast:
+  case CallingConv::Cold:
     return CSR_AMDGPU_HighRegs_SaveList;
   default: {
     // Dummy to not crash RegisterClassInfo.
@@ -57,11 +57,17 @@ const MCPhysReg *SIRegisterInfo::getCalleeSavedRegs(
   }
 }
 
+const MCPhysReg *
+SIRegisterInfo::getCalleeSavedRegsViaCopy(const MachineFunction *MF) const {
+  return nullptr;
+}
+
 const uint32_t *SIRegisterInfo::getCallPreservedMask(const MachineFunction &MF,
                                                      CallingConv::ID CC) const {
   switch (CC) {
   case CallingConv::C:
   case CallingConv::Fast:
+  case CallingConv::Cold:
     return CSR_AMDGPU_HighRegs_RegMask;
   default:
     return nullptr;

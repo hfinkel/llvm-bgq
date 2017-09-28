@@ -199,6 +199,16 @@ define i256 @test_cttz() {
   ret i256 %x
 }
 
+declare <2 x i256> @llvm.cttz.v2i256(<2 x i256> %src, i1 %is_zero_undef)
+
+define <2 x i256> @test_cttz_vec() {
+; CHECK-LABEL: @test_cttz_vec(
+; CHECK-NEXT:    ret <2 x i256> <i256 1, i256 1>
+;
+  %x = call <2 x i256> @llvm.cttz.v2i256(<2 x i256> <i256 10, i256 10>, i1 false)
+  ret <2 x i256> %x
+}
+
 declare i256 @llvm.ctpop.i256(i256 %src)
 
 define i256 @test_ctpop() {
@@ -232,6 +242,7 @@ declare float @llvm.ceil.f32(float) nounwind readnone
 declare float @llvm.trunc.f32(float) nounwind readnone
 declare float @llvm.rint.f32(float) nounwind readnone
 declare float @llvm.nearbyint.f32(float) nounwind readnone
+declare float @llvm.canonicalize.f32(float) nounwind readnone
 
 ; Test idempotent intrinsics
 define float @test_idempotence(float %a) {
@@ -242,12 +253,14 @@ define float @test_idempotence(float %a) {
 ; CHECK-NEXT:    [[D0:%.*]] = call float @llvm.trunc.f32(float [[A]])
 ; CHECK-NEXT:    [[E0:%.*]] = call float @llvm.rint.f32(float [[A]])
 ; CHECK-NEXT:    [[F0:%.*]] = call float @llvm.nearbyint.f32(float [[A]])
+; CHECK-NEXT:    [[G0:%.*]] = call float @llvm.canonicalize.f32(float [[A]])
 ; CHECK-NEXT:    [[R0:%.*]] = fadd float [[A0]], [[B0]]
 ; CHECK-NEXT:    [[R1:%.*]] = fadd float [[R0]], [[C0]]
 ; CHECK-NEXT:    [[R2:%.*]] = fadd float [[R1]], [[D0]]
 ; CHECK-NEXT:    [[R3:%.*]] = fadd float [[R2]], [[E0]]
 ; CHECK-NEXT:    [[R4:%.*]] = fadd float [[R3]], [[F0]]
-; CHECK-NEXT:    ret float [[R4]]
+; CHECK-NEXT:    [[R5:%.*]] = fadd float [[R4]], [[G0]]
+; CHECK-NEXT:    ret float [[R5]]
 ;
 
   %a0 = call float @llvm.fabs.f32(float %a)
@@ -268,13 +281,17 @@ define float @test_idempotence(float %a) {
   %f0 = call float @llvm.nearbyint.f32(float %a)
   %f1 = call float @llvm.nearbyint.f32(float %f0)
 
+  %g0 = call float @llvm.canonicalize.f32(float %a)
+  %g1 = call float @llvm.canonicalize.f32(float %g0)
+
   %r0 = fadd float %a1, %b1
   %r1 = fadd float %r0, %c1
   %r2 = fadd float %r1, %d1
   %r3 = fadd float %r2, %e1
   %r4 = fadd float %r3, %f1
+  %r5 = fadd float %r4, %g1
 
-  ret float %r4
+  ret float %r5
 }
 
 define i8* @operator_new() {
@@ -410,3 +427,26 @@ define <8 x i32> @masked_load_undef_mask(<8 x i32>* %V) {
 declare noalias i8* @malloc(i64)
 
 declare <8 x i32> @llvm.masked.load.v8i32.p0v8i32(<8 x i32>*, i32, <8 x i1>, <8 x i32>)
+
+declare double @llvm.powi.f64(double, i32)
+declare <2 x double> @llvm.powi.v2f64(<2 x double>, i32)
+
+define double @constant_fold_powi() nounwind uwtable ssp {
+; CHECK-LABEL: @constant_fold_powi(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    ret double 9.000000e+00
+;
+entry:
+  %0 = call double @llvm.powi.f64(double 3.00000e+00, i32 2)
+  ret double %0
+}
+
+define <2 x double> @constant_fold_powi_vec() nounwind uwtable ssp {
+; CHECK-LABEL: @constant_fold_powi_vec(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    ret <2 x double> <double 9.000000e+00, double 2.500000e+01>
+;
+entry:
+  %0 = call <2 x double> @llvm.powi.v2f64(<2 x double> <double 3.00000e+00, double 5.00000e+00>, i32 2)
+  ret <2 x double> %0
+}

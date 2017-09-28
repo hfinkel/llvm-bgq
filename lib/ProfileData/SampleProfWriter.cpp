@@ -18,10 +18,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ProfileData/SampleProfWriter.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ProfileData/ProfileCommon.h"
 #include "llvm/ProfileData/SampleProf.h"
-#include "llvm/ProfileData/SampleProfWriter.h"
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/LEB128.h"
@@ -222,7 +222,10 @@ std::error_code SampleProfileWriterBinary::writeBody(const FunctionSamples &S) {
   }
 
   // Recursively emit all the callsite samples.
-  encodeULEB128(S.getCallsiteSamples().size(), OS);
+  uint64_t NumCallsites = 0;
+  for (const auto &J : S.getCallsiteSamples())
+    NumCallsites += J.second.size();
+  encodeULEB128(NumCallsites, OS);
   for (const auto &J : S.getCallsiteSamples())
     for (const auto &FS : J.second) {
       LineLocation Loc = J.first;

@@ -715,6 +715,10 @@ bool NVPTXDAGToDAGISel::tryIntrinsicNoChain(SDNode *N) {
   case Intrinsic::nvvm_texsurf_handle_internal:
     SelectTexSurfHandle(N);
     return true;
+  case Intrinsic::nvvm_match_all_sync_i32p:
+  case Intrinsic::nvvm_match_all_sync_i64p:
+    SelectMatchAll(N);
+    return true;
   }
 }
 
@@ -724,6 +728,36 @@ void NVPTXDAGToDAGISel::SelectTexSurfHandle(SDNode *N) {
   SDValue GlobalVal = Wrapper.getOperand(0);
   ReplaceNode(N, CurDAG->getMachineNode(NVPTX::texsurf_handles, SDLoc(N),
                                         MVT::i64, GlobalVal));
+}
+
+void NVPTXDAGToDAGISel::SelectMatchAll(SDNode *N) {
+  SDLoc DL(N);
+  enum { IS_I64 = 4, HAS_CONST_VALUE = 2, HAS_CONST_MASK = 1 };
+  unsigned IID = cast<ConstantSDNode>(N->getOperand(0))->getZExtValue();
+  unsigned OpcodeIndex =
+      (IID == Intrinsic::nvvm_match_all_sync_i64p) ? IS_I64 : 0;
+  SDValue MaskOp = N->getOperand(1);
+  SDValue ValueOp = N->getOperand(2);
+  if (ConstantSDNode *ValueConst = dyn_cast<ConstantSDNode>(ValueOp)) {
+    OpcodeIndex |= HAS_CONST_VALUE;
+    ValueOp = CurDAG->getTargetConstant(ValueConst->getZExtValue(), DL,
+                                        ValueConst->getValueType(0));
+  }
+  if (ConstantSDNode *MaskConst = dyn_cast<ConstantSDNode>(MaskOp)) {
+    OpcodeIndex |= HAS_CONST_MASK;
+    MaskOp = CurDAG->getTargetConstant(MaskConst->getZExtValue(), DL,
+                                       MaskConst->getValueType(0));
+  }
+  // Maps {IS_I64, HAS_CONST_VALUE, HAS_CONST_MASK} -> opcode
+  unsigned Opcodes[8] = {
+      NVPTX::MATCH_ALLP_SYNC_32rr, NVPTX::MATCH_ALLP_SYNC_32ri,
+      NVPTX::MATCH_ALLP_SYNC_32ir, NVPTX::MATCH_ALLP_SYNC_32ii,
+      NVPTX::MATCH_ALLP_SYNC_64rr, NVPTX::MATCH_ALLP_SYNC_64ri,
+      NVPTX::MATCH_ALLP_SYNC_64ir, NVPTX::MATCH_ALLP_SYNC_64ii};
+  SDNode *NewNode = CurDAG->getMachineNode(Opcodes[OpcodeIndex], DL,
+                                           {ValueOp->getValueType(0), MVT::i1},
+                                           {MaskOp, ValueOp});
+  ReplaceNode(N, NewNode);
 }
 
 void NVPTXDAGToDAGISel::SelectAddrSpaceCast(SDNode *N) {
@@ -2271,9 +2305,7 @@ bool NVPTXDAGToDAGISel::tryStoreParam(SDNode *N) {
 }
 
 bool NVPTXDAGToDAGISel::tryTextureIntrinsic(SDNode *N) {
-  SDValue Chain = N->getOperand(0);
   unsigned Opc = 0;
-  SmallVector<SDValue, 8> Ops;
 
   switch (N->getOpcode()) {
   default: return false;
@@ -2784,1211 +2816,518 @@ bool NVPTXDAGToDAGISel::tryTextureIntrinsic(SDNode *N) {
   }
 
   // Copy over operands
-  for (unsigned i = 1; i < N->getNumOperands(); ++i) {
-    Ops.push_back(N->getOperand(i));
-  }
+  SmallVector<SDValue, 8> Ops(N->op_begin() + 1, N->op_end());
+  Ops.push_back(N->getOperand(0)); // Move chain to the back.
 
-  Ops.push_back(Chain);
   ReplaceNode(N, CurDAG->getMachineNode(Opc, SDLoc(N), N->getVTList(), Ops));
   return true;
 }
 
 bool NVPTXDAGToDAGISel::trySurfaceIntrinsic(SDNode *N) {
-  SDValue Chain = N->getOperand(0);
-  SDValue TexHandle = N->getOperand(1);
   unsigned Opc = 0;
-  SmallVector<SDValue, 8> Ops;
   switch (N->getOpcode()) {
   default: return false;
   case NVPTXISD::Suld1DI8Clamp:
     Opc = NVPTX::SULD_1D_I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI16Clamp:
     Opc = NVPTX::SULD_1D_I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI32Clamp:
     Opc = NVPTX::SULD_1D_I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI64Clamp:
     Opc = NVPTX::SULD_1D_I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I8Clamp:
     Opc = NVPTX::SULD_1D_V2I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I16Clamp:
     Opc = NVPTX::SULD_1D_V2I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I32Clamp:
     Opc = NVPTX::SULD_1D_V2I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I64Clamp:
     Opc = NVPTX::SULD_1D_V2I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I8Clamp:
     Opc = NVPTX::SULD_1D_V4I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I16Clamp:
     Opc = NVPTX::SULD_1D_V4I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I32Clamp:
     Opc = NVPTX::SULD_1D_V4I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI8Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI16Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI32Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI64Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I8Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_V2I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I16Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_V2I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I32Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_V2I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I64Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_V2I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I8Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_V4I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I16Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_V4I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I32Clamp:
     Opc = NVPTX::SULD_1D_ARRAY_V4I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI8Clamp:
     Opc = NVPTX::SULD_2D_I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI16Clamp:
     Opc = NVPTX::SULD_2D_I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI32Clamp:
     Opc = NVPTX::SULD_2D_I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI64Clamp:
     Opc = NVPTX::SULD_2D_I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I8Clamp:
     Opc = NVPTX::SULD_2D_V2I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I16Clamp:
     Opc = NVPTX::SULD_2D_V2I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I32Clamp:
     Opc = NVPTX::SULD_2D_V2I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I64Clamp:
     Opc = NVPTX::SULD_2D_V2I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I8Clamp:
     Opc = NVPTX::SULD_2D_V4I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I16Clamp:
     Opc = NVPTX::SULD_2D_V4I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I32Clamp:
     Opc = NVPTX::SULD_2D_V4I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI8Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI16Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI32Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI64Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I8Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_V2I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I16Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_V2I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I32Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_V2I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I64Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_V2I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I8Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_V4I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I16Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_V4I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I32Clamp:
     Opc = NVPTX::SULD_2D_ARRAY_V4I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI8Clamp:
     Opc = NVPTX::SULD_3D_I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI16Clamp:
     Opc = NVPTX::SULD_3D_I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI32Clamp:
     Opc = NVPTX::SULD_3D_I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI64Clamp:
     Opc = NVPTX::SULD_3D_I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I8Clamp:
     Opc = NVPTX::SULD_3D_V2I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I16Clamp:
     Opc = NVPTX::SULD_3D_V2I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I32Clamp:
     Opc = NVPTX::SULD_3D_V2I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I64Clamp:
     Opc = NVPTX::SULD_3D_V2I64_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I8Clamp:
     Opc = NVPTX::SULD_3D_V4I8_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I16Clamp:
     Opc = NVPTX::SULD_3D_V4I16_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I32Clamp:
     Opc = NVPTX::SULD_3D_V4I32_CLAMP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI8Trap:
     Opc = NVPTX::SULD_1D_I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI16Trap:
     Opc = NVPTX::SULD_1D_I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI32Trap:
     Opc = NVPTX::SULD_1D_I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI64Trap:
     Opc = NVPTX::SULD_1D_I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I8Trap:
     Opc = NVPTX::SULD_1D_V2I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I16Trap:
     Opc = NVPTX::SULD_1D_V2I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I32Trap:
     Opc = NVPTX::SULD_1D_V2I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I64Trap:
     Opc = NVPTX::SULD_1D_V2I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I8Trap:
     Opc = NVPTX::SULD_1D_V4I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I16Trap:
     Opc = NVPTX::SULD_1D_V4I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I32Trap:
     Opc = NVPTX::SULD_1D_V4I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI8Trap:
     Opc = NVPTX::SULD_1D_ARRAY_I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI16Trap:
     Opc = NVPTX::SULD_1D_ARRAY_I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI32Trap:
     Opc = NVPTX::SULD_1D_ARRAY_I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI64Trap:
     Opc = NVPTX::SULD_1D_ARRAY_I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I8Trap:
     Opc = NVPTX::SULD_1D_ARRAY_V2I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I16Trap:
     Opc = NVPTX::SULD_1D_ARRAY_V2I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I32Trap:
     Opc = NVPTX::SULD_1D_ARRAY_V2I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I64Trap:
     Opc = NVPTX::SULD_1D_ARRAY_V2I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I8Trap:
     Opc = NVPTX::SULD_1D_ARRAY_V4I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I16Trap:
     Opc = NVPTX::SULD_1D_ARRAY_V4I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I32Trap:
     Opc = NVPTX::SULD_1D_ARRAY_V4I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI8Trap:
     Opc = NVPTX::SULD_2D_I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI16Trap:
     Opc = NVPTX::SULD_2D_I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI32Trap:
     Opc = NVPTX::SULD_2D_I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI64Trap:
     Opc = NVPTX::SULD_2D_I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I8Trap:
     Opc = NVPTX::SULD_2D_V2I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I16Trap:
     Opc = NVPTX::SULD_2D_V2I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I32Trap:
     Opc = NVPTX::SULD_2D_V2I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I64Trap:
     Opc = NVPTX::SULD_2D_V2I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I8Trap:
     Opc = NVPTX::SULD_2D_V4I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I16Trap:
     Opc = NVPTX::SULD_2D_V4I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I32Trap:
     Opc = NVPTX::SULD_2D_V4I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI8Trap:
     Opc = NVPTX::SULD_2D_ARRAY_I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI16Trap:
     Opc = NVPTX::SULD_2D_ARRAY_I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI32Trap:
     Opc = NVPTX::SULD_2D_ARRAY_I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI64Trap:
     Opc = NVPTX::SULD_2D_ARRAY_I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I8Trap:
     Opc = NVPTX::SULD_2D_ARRAY_V2I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I16Trap:
     Opc = NVPTX::SULD_2D_ARRAY_V2I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I32Trap:
     Opc = NVPTX::SULD_2D_ARRAY_V2I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I64Trap:
     Opc = NVPTX::SULD_2D_ARRAY_V2I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I8Trap:
     Opc = NVPTX::SULD_2D_ARRAY_V4I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I16Trap:
     Opc = NVPTX::SULD_2D_ARRAY_V4I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I32Trap:
     Opc = NVPTX::SULD_2D_ARRAY_V4I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI8Trap:
     Opc = NVPTX::SULD_3D_I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI16Trap:
     Opc = NVPTX::SULD_3D_I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI32Trap:
     Opc = NVPTX::SULD_3D_I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI64Trap:
     Opc = NVPTX::SULD_3D_I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I8Trap:
     Opc = NVPTX::SULD_3D_V2I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I16Trap:
     Opc = NVPTX::SULD_3D_V2I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I32Trap:
     Opc = NVPTX::SULD_3D_V2I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I64Trap:
     Opc = NVPTX::SULD_3D_V2I64_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I8Trap:
     Opc = NVPTX::SULD_3D_V4I8_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I16Trap:
     Opc = NVPTX::SULD_3D_V4I16_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I32Trap:
     Opc = NVPTX::SULD_3D_V4I32_TRAP;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI8Zero:
     Opc = NVPTX::SULD_1D_I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI16Zero:
     Opc = NVPTX::SULD_1D_I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI32Zero:
     Opc = NVPTX::SULD_1D_I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DI64Zero:
     Opc = NVPTX::SULD_1D_I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I8Zero:
     Opc = NVPTX::SULD_1D_V2I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I16Zero:
     Opc = NVPTX::SULD_1D_V2I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I32Zero:
     Opc = NVPTX::SULD_1D_V2I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV2I64Zero:
     Opc = NVPTX::SULD_1D_V2I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I8Zero:
     Opc = NVPTX::SULD_1D_V4I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I16Zero:
     Opc = NVPTX::SULD_1D_V4I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DV4I32Zero:
     Opc = NVPTX::SULD_1D_V4I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI8Zero:
     Opc = NVPTX::SULD_1D_ARRAY_I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI16Zero:
     Opc = NVPTX::SULD_1D_ARRAY_I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI32Zero:
     Opc = NVPTX::SULD_1D_ARRAY_I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayI64Zero:
     Opc = NVPTX::SULD_1D_ARRAY_I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I8Zero:
     Opc = NVPTX::SULD_1D_ARRAY_V2I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I16Zero:
     Opc = NVPTX::SULD_1D_ARRAY_V2I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I32Zero:
     Opc = NVPTX::SULD_1D_ARRAY_V2I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV2I64Zero:
     Opc = NVPTX::SULD_1D_ARRAY_V2I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I8Zero:
     Opc = NVPTX::SULD_1D_ARRAY_V4I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I16Zero:
     Opc = NVPTX::SULD_1D_ARRAY_V4I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld1DArrayV4I32Zero:
     Opc = NVPTX::SULD_1D_ARRAY_V4I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI8Zero:
     Opc = NVPTX::SULD_2D_I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI16Zero:
     Opc = NVPTX::SULD_2D_I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI32Zero:
     Opc = NVPTX::SULD_2D_I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DI64Zero:
     Opc = NVPTX::SULD_2D_I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I8Zero:
     Opc = NVPTX::SULD_2D_V2I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I16Zero:
     Opc = NVPTX::SULD_2D_V2I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I32Zero:
     Opc = NVPTX::SULD_2D_V2I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV2I64Zero:
     Opc = NVPTX::SULD_2D_V2I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I8Zero:
     Opc = NVPTX::SULD_2D_V4I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I16Zero:
     Opc = NVPTX::SULD_2D_V4I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DV4I32Zero:
     Opc = NVPTX::SULD_2D_V4I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI8Zero:
     Opc = NVPTX::SULD_2D_ARRAY_I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI16Zero:
     Opc = NVPTX::SULD_2D_ARRAY_I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI32Zero:
     Opc = NVPTX::SULD_2D_ARRAY_I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayI64Zero:
     Opc = NVPTX::SULD_2D_ARRAY_I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I8Zero:
     Opc = NVPTX::SULD_2D_ARRAY_V2I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I16Zero:
     Opc = NVPTX::SULD_2D_ARRAY_V2I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I32Zero:
     Opc = NVPTX::SULD_2D_ARRAY_V2I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV2I64Zero:
     Opc = NVPTX::SULD_2D_ARRAY_V2I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I8Zero:
     Opc = NVPTX::SULD_2D_ARRAY_V4I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I16Zero:
     Opc = NVPTX::SULD_2D_ARRAY_V4I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld2DArrayV4I32Zero:
     Opc = NVPTX::SULD_2D_ARRAY_V4I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI8Zero:
     Opc = NVPTX::SULD_3D_I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI16Zero:
     Opc = NVPTX::SULD_3D_I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI32Zero:
     Opc = NVPTX::SULD_3D_I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DI64Zero:
     Opc = NVPTX::SULD_3D_I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I8Zero:
     Opc = NVPTX::SULD_3D_V2I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I16Zero:
     Opc = NVPTX::SULD_3D_V2I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I32Zero:
     Opc = NVPTX::SULD_3D_V2I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV2I64Zero:
     Opc = NVPTX::SULD_3D_V2I64_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I8Zero:
     Opc = NVPTX::SULD_3D_V4I8_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I16Zero:
     Opc = NVPTX::SULD_3D_V4I16_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   case NVPTXISD::Suld3DV4I32Zero:
     Opc = NVPTX::SULD_3D_V4I32_ZERO;
-    Ops.push_back(TexHandle);
-    Ops.push_back(N->getOperand(2));
-    Ops.push_back(N->getOperand(3));
-    Ops.push_back(N->getOperand(4));
-    Ops.push_back(Chain);
     break;
   }
+
+  // Copy over operands
+  SmallVector<SDValue, 8> Ops(N->op_begin() + 1, N->op_end());
+  Ops.push_back(N->getOperand(0)); // Move chain to the back.
+
   ReplaceNode(N, CurDAG->getMachineNode(Opc, SDLoc(N), N->getVTList(), Ops));
   return true;
 }

@@ -24,7 +24,6 @@
 
 namespace llvm {
 class DebugLoc;
-class LLVMContext;
 class Loop;
 class Pass;
 class Twine;
@@ -34,7 +33,7 @@ class Value;
 ///
 /// It allows reporting when optimizations are performed and when they are not
 /// along with the reasons for it.  Hotness information of the corresponding
-/// code region can be included in the remark if DiagnosticHotnessRequested is
+/// code region can be included in the remark if DiagnosticsHotnessRequested is
 /// enabled in the LLVM context.
 class OptimizationRemarkEmitter {
 public:
@@ -45,10 +44,10 @@ public:
   /// analysis pass).
   ///
   /// Note that this ctor has a very different cost depending on whether
-  /// F->getContext().getDiagnosticHotnessRequested() is on or not.  If it's off
+  /// F->getContext().getDiagnosticsHotnessRequested() is on or not.  If it's off
   /// the operation is free.
   ///
-  /// Whereas if DiagnosticHotnessRequested is on, it is fairly expensive
+  /// Whereas if DiagnosticsHotnessRequested is on, it is fairly expensive
   /// operation since BFI and all its required analyses are computed.  This is
   /// for example useful for CGSCC passes that can't use function analyses
   /// passes in the old PM.
@@ -69,10 +68,22 @@ public:
 
   /// \brief Output the remark via the diagnostic handler and to the
   /// optimization record file.
-  ///
-  /// This is the new interface that should be now used rather than the legacy
-  /// emit* APIs.
   void emit(DiagnosticInfoOptimizationBase &OptDiag);
+
+  /// \brief Take a lambda that returns a remark which will be emitted.  Second
+  /// argument is only used to restrict this to functions.
+  template <typename T>
+  void emit(T RemarkBuilder, decltype(RemarkBuilder()) * = nullptr) {
+    // Avoid building the remark unless we know there are at least *some*
+    // remarks enabled. We can't currently check whether remarks are requested
+    // for the calling pass since that requires actually building the remark.
+
+    if (F->getContext().getDiagnosticsOutputFile() ||
+        F->getContext().getDiagHandlerPtr()->isAnyRemarkEnabled()) {
+      auto R = RemarkBuilder();
+      emit((DiagnosticInfoOptimizationBase &)R);
+    }
+  }
 
   /// \brief Whether we allow for extra compile-time budget to perform more
   /// analysis to produce fewer false positives.
@@ -81,10 +92,9 @@ public:
   /// use the extra analysis (1) to filter trivial false positives or (2) to
   /// provide more context so that non-trivial false positives can be quickly
   /// detected by the user.
-  bool allowExtraAnalysis() const {
-    // For now, only allow this with -fsave-optimization-record since the -Rpass
-    // options are handled in the front-end.
-    return F->getContext().getDiagnosticsOutputFile();
+  bool allowExtraAnalysis(StringRef PassName) const {
+    return (F->getContext().getDiagnosticsOutputFile() ||
+            F->getContext().getDiagHandlerPtr()->isAnyRemarkEnabled(PassName));
   }
 
 private:

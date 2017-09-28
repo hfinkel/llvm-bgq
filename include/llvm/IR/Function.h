@@ -19,10 +19,10 @@
 #define LLVM_IR_FUNCTION_H
 
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/ilist_node.h"
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/ADT/ilist_node.h"
+#include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
@@ -30,7 +30,6 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalObject.h"
 #include "llvm/IR/GlobalValue.h"
-#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/OperandTraits.h"
 #include "llvm/IR/SymbolTableListTraits.h"
 #include "llvm/IR/Value.h"
@@ -43,6 +42,10 @@
 #include <string>
 
 namespace llvm {
+
+namespace Intrinsic {
+enum ID : unsigned;
+}
 
 class AssemblyAnnotationWriter;
 class Constant;
@@ -124,6 +127,11 @@ public:
   Function(const Function&) = delete;
   void operator=(const Function&) = delete;
   ~Function();
+
+  // This is here to help easily convert from FunctionT * (Function * or
+  // MachineFunction *) in BlockFrequencyInfoImpl to Function * by calling
+  // FunctionT->getFunction().
+  const Function *getFunction() const { return this; }
 
   static Function *Create(FunctionType *Ty, LinkageTypes Linkage,
                           const Twine &N = "", Module *M = nullptr) {
@@ -214,10 +222,6 @@ public:
     addAttribute(AttributeList::FunctionIndex, Attr);
   }
 
-  void addParamAttr(unsigned ArgNo, Attribute::AttrKind Kind) {
-    addAttribute(ArgNo + AttributeList::FirstArgIndex, Kind);
-  }
-
   /// @brief Remove function attributes from this function.
   void removeFnAttr(Attribute::AttrKind Kind) {
     removeAttribute(AttributeList::FunctionIndex, Kind);
@@ -227,10 +231,6 @@ public:
   void removeFnAttr(StringRef Kind) {
     setAttributes(getAttributes().removeAttribute(
         getContext(), AttributeList::FunctionIndex, Kind));
-  }
-
-  void removeParamAttr(unsigned ArgNo, Attribute::AttrKind Kind) {
-    removeAttribute(ArgNo + AttributeList::FirstArgIndex, Kind);
   }
 
   /// \brief Set the entry count for this function.
@@ -299,6 +299,15 @@ public:
   /// @brief adds the attributes to the list of attributes.
   void addAttributes(unsigned i, const AttrBuilder &Attrs);
 
+  /// @brief adds the attribute to the list of attributes for the given arg.
+  void addParamAttr(unsigned ArgNo, Attribute::AttrKind Kind);
+
+  /// @brief adds the attribute to the list of attributes for the given arg.
+  void addParamAttr(unsigned ArgNo, Attribute Attr);
+
+  /// @brief adds the attributes to the list of attributes for the given arg.
+  void addParamAttrs(unsigned ArgNo, const AttrBuilder &Attrs);
+
   /// @brief removes the attribute from the list of attributes.
   void removeAttribute(unsigned i, Attribute::AttrKind Kind);
 
@@ -307,6 +316,15 @@ public:
 
   /// @brief removes the attributes from the list of attributes.
   void removeAttributes(unsigned i, const AttrBuilder &Attrs);
+
+  /// @brief removes the attribute from the list of attributes.
+  void removeParamAttr(unsigned ArgNo, Attribute::AttrKind Kind);
+
+  /// @brief removes the attribute from the list of attributes.
+  void removeParamAttr(unsigned ArgNo, StringRef Kind);
+
+  /// @brief removes the attribute from the list of attributes.
+  void removeParamAttrs(unsigned ArgNo, const AttrBuilder &Attrs);
 
   /// @brief check if an attributes is in the list of attributes.
   bool hasAttribute(unsigned i, Attribute::AttrKind Kind) const {
@@ -329,9 +347,17 @@ public:
   /// @brief adds the dereferenceable attribute to the list of attributes.
   void addDereferenceableAttr(unsigned i, uint64_t Bytes);
 
+  /// @brief adds the dereferenceable attribute to the list of attributes for
+  /// the given arg.
+  void addDereferenceableParamAttr(unsigned ArgNo, uint64_t Bytes);
+
   /// @brief adds the dereferenceable_or_null attribute to the list of
   /// attributes.
   void addDereferenceableOrNullAttr(unsigned i, uint64_t Bytes);
+
+  /// @brief adds the dereferenceable_or_null attribute to the list of
+  /// attributes for the given arg.
+  void addDereferenceableOrNullParamAttr(unsigned ArgNo, uint64_t Bytes);
 
   /// @brief Extract the alignment for a call or parameter (0=unknown).
   unsigned getParamAlignment(unsigned ArgNo) const {
@@ -345,11 +371,24 @@ public:
     return AttributeSets.getDereferenceableBytes(i);
   }
 
+  /// @brief Extract the number of dereferenceable bytes for a parameter.
+  /// @param ArgNo Index of an argument, with 0 being the first function arg.
+  uint64_t getParamDereferenceableBytes(unsigned ArgNo) const {
+    return AttributeSets.getParamDereferenceableBytes(ArgNo);
+  }
+
   /// @brief Extract the number of dereferenceable_or_null bytes for a call or
   /// parameter (0=unknown).
   /// @param i AttributeList index, referring to a return value or argument.
   uint64_t getDereferenceableOrNullBytes(unsigned i) const {
     return AttributeSets.getDereferenceableOrNullBytes(i);
+  }
+
+  /// @brief Extract the number of dereferenceable_or_null bytes for a
+  /// parameter.
+  /// @param ArgNo AttributeList ArgNo, referring to an argument.
+  uint64_t getParamDereferenceableOrNullBytes(unsigned ArgNo) const {
+    return AttributeSets.getParamDereferenceableOrNullBytes(ArgNo);
   }
 
   /// @brief Determine if the function does not access memory.
@@ -640,7 +679,7 @@ public:
   void viewCFGOnly() const;
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const Value *V) {
+  static bool classof(const Value *V) {
     return V->getValueID() == Value::FunctionVal;
   }
 

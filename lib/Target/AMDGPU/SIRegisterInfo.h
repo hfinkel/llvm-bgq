@@ -16,8 +16,8 @@
 #define LLVM_LIB_TARGET_AMDGPU_SIREGISTERINFO_H
 
 #include "AMDGPURegisterInfo.h"
-#include "SIDefines.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+#include "SIDefines.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 
 namespace llvm {
@@ -63,8 +63,15 @@ public:
   BitVector getReservedRegs(const MachineFunction &MF) const override;
 
   const MCPhysReg *getCalleeSavedRegs(const MachineFunction *MF) const override;
+  const MCPhysReg *getCalleeSavedRegsViaCopy(const MachineFunction *MF) const;
   const uint32_t *getCallPreservedMask(const MachineFunction &MF,
                                        CallingConv::ID) const override;
+
+  // Stack access is very expensive. CSRs are also the high registers, and we
+  // want to minimize the number of used registers.
+  unsigned getCSRFirstUseCost() const override {
+    return 100;
+  }
 
   unsigned getFrameRegister(const MachineFunction &MF) const override;
 
@@ -111,6 +118,8 @@ public:
 
   bool eliminateSGPRToVGPRSpillFrameIndex(MachineBasicBlock::iterator MI,
                                           int FI, RegScavenger *RS) const;
+
+  StringRef getRegAsmName(unsigned Reg) const override;
 
   unsigned getHWRegIndex(unsigned Reg) const {
     return getEncodingValue(Reg) & 0xff;
@@ -176,30 +185,6 @@ public:
     return OpType >= AMDGPU::OPERAND_SRC_FIRST &&
            OpType <= AMDGPU::OPERAND_SRC_LAST;
   }
-
-  enum PreloadedValue {
-    // SGPRS:
-    PRIVATE_SEGMENT_BUFFER = 0,
-    DISPATCH_PTR        =  1,
-    QUEUE_PTR           =  2,
-    KERNARG_SEGMENT_PTR =  3,
-    DISPATCH_ID         =  4,
-    FLAT_SCRATCH_INIT   =  5,
-    WORKGROUP_ID_X      = 10,
-    WORKGROUP_ID_Y      = 11,
-    WORKGROUP_ID_Z      = 12,
-    PRIVATE_SEGMENT_WAVE_BYTE_OFFSET = 14,
-
-    // VGPRS:
-    FIRST_VGPR_VALUE    = 15,
-    WORKITEM_ID_X       = FIRST_VGPR_VALUE,
-    WORKITEM_ID_Y       = 16,
-    WORKITEM_ID_Z       = 17
-  };
-
-  /// \brief Returns the physical register that \p Value is stored in.
-  unsigned getPreloadedValue(const MachineFunction &MF,
-                             enum PreloadedValue Value) const;
 
   unsigned findUnusedRegister(const MachineRegisterInfo &MRI,
                               const TargetRegisterClass *RC,

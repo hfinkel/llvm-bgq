@@ -15,12 +15,14 @@
 #define LLVM_COV_SOURCECOVERAGEVIEW_H
 
 #include "CoverageViewOptions.h"
+#include "CoverageSummaryInfo.h"
 #include "llvm/ProfileData/Coverage/CoverageMapping.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <vector>
 
 namespace llvm {
 
+class CoverageFilter;
 class SourceCoverageView;
 
 /// \brief A view that represents a macro or include expansion.
@@ -61,30 +63,6 @@ struct InstantiationView {
   friend bool operator<(const InstantiationView &LHS,
                         const InstantiationView &RHS) {
     return LHS.Line < RHS.Line;
-  }
-};
-
-/// \brief Coverage statistics for a single line.
-struct LineCoverageStats {
-  uint64_t ExecutionCount;
-  unsigned RegionCount;
-  bool Mapped;
-
-  LineCoverageStats() : ExecutionCount(0), RegionCount(0), Mapped(false) {}
-
-  bool isMapped() const { return Mapped; }
-
-  bool hasMultipleRegions() const { return RegionCount > 1; }
-
-  void addRegionStartCount(uint64_t Count) {
-    // The max of all region starts is the most interesting value.
-    addRegionCount(RegionCount ? std::max(ExecutionCount, Count) : Count);
-    ++RegionCount;
-  }
-
-  void addRegionCount(uint64_t Count) {
-    Mapped = true;
-    ExecutionCount = Count;
   }
 };
 
@@ -134,7 +112,8 @@ public:
 
   /// \brief Create an index which lists reports for the given source files.
   virtual Error createIndexFile(ArrayRef<std::string> SourceFiles,
-                                const coverage::CoverageMapping &Coverage) = 0;
+                                const coverage::CoverageMapping &Coverage,
+                                const CoverageFilter &Filters) = 0;
 
   /// @}
 };
@@ -246,7 +225,7 @@ protected:
   static std::string formatCount(uint64_t N);
 
   /// \brief Check if region marker output is expected for a line.
-  bool shouldRenderRegionMarkers(bool LineHasMultipleRegions) const;
+  bool shouldRenderRegionMarkers(CoverageSegmentArray Segments) const;
 
   /// \brief Check if there are any sub-views attached to this view.
   bool hasSubViews() const;
@@ -281,7 +260,7 @@ public:
   /// \brief Print the code coverage information for a specific portion of a
   /// source file to the output stream.
   void print(raw_ostream &OS, bool WholeFile, bool ShowSourceName,
-             unsigned ViewDepth = 0);
+             bool ShowTitle, unsigned ViewDepth = 0);
 };
 
 } // namespace llvm

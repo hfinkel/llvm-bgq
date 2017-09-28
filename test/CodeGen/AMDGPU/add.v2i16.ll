@@ -66,7 +66,7 @@ define amdgpu_kernel void @s_test_add_v2i16_kernarg(<2 x i16> addrspace(1)* %out
 
 ; VI-DAG: v_add_u16_e32 v{{[0-9]+}}, 0x7b, v{{[0-9]+}}
 ; VI-DAG: v_mov_b32_e32 v[[SCONST:[0-9]+]], 0x1c8
-; VI-DAG: v_add_u16_sdwa v{{[0-9]+}}, v[[SCONST]], v{{[0-9]+}} dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
+; VI-DAG: v_add_u16_sdwa v{{[0-9]+}}, v{{[0-9]+}}, v[[SCONST]] dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
 define amdgpu_kernel void @v_test_add_v2i16_constant(<2 x i16> addrspace(1)* %out, <2 x i16> addrspace(1)* %in0) #1 {
   %tid = call i32 @llvm.amdgcn.workitem.id.x()
   %gep.out = getelementptr inbounds <2 x i16>, <2 x i16> addrspace(1)* %out, i32 %tid
@@ -84,7 +84,7 @@ define amdgpu_kernel void @v_test_add_v2i16_constant(<2 x i16> addrspace(1)* %ou
 
 ; VI-DAG: v_add_u16_e32 v{{[0-9]+}}, 0xfffffcb3, v{{[0-9]+}}
 ; VI-DAG: v_mov_b32_e32 v[[SCONST:[0-9]+]], 0xfffffc21
-; VI-DAG: v_add_u16_sdwa v{{[0-9]+}}, v[[SCONST]], v{{[0-9]+}} dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
+; VI-DAG: v_add_u16_sdwa v{{[0-9]+}}, v{{[0-9]+}}, v[[SCONST]] dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
 define amdgpu_kernel void @v_test_add_v2i16_neg_constant(<2 x i16> addrspace(1)* %out, <2 x i16> addrspace(1)* %in0) #1 {
   %tid = call i32 @llvm.amdgcn.workitem.id.x()
   %gep.out = getelementptr inbounds <2 x i16>, <2 x i16> addrspace(1)* %out, i32 %tid
@@ -101,7 +101,7 @@ define amdgpu_kernel void @v_test_add_v2i16_neg_constant(<2 x i16> addrspace(1)*
 ; VI: v_mov_b32_e32 v[[SCONST:[0-9]+]], -1
 ; VI: flat_load_ushort [[LOAD0:v[0-9]+]]
 ; VI: flat_load_ushort [[LOAD1:v[0-9]+]]
-; VI-DAG: v_add_u16_sdwa v{{[0-9]+}}, v[[SCONST]], [[LOAD0]] dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
+; VI-DAG: v_add_u16_sdwa v{{[0-9]+}}, [[LOAD0]], v[[SCONST]] dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
 ; VI-DAG: v_add_u16_e32 v{{[0-9]+}}, -1, [[LOAD1]]
 ; VI: v_or_b32_e32
 define amdgpu_kernel void @v_test_add_v2i16_inline_neg1(<2 x i16> addrspace(1)* %out, <2 x i16> addrspace(1)* %in0) #1 {
@@ -140,7 +140,7 @@ define amdgpu_kernel void @v_test_add_v2i16_inline_lo_zero_hi(<2 x i16> addrspac
 
 ; VI-NOT: v_add_u16
 ; VI: v_mov_b32_e32 v[[K:[0-9]+]], 0x3f80
-; VI: v_add_u16_sdwa v{{[0-9]+}}, v[[K]], v{{[0-9]+}} dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
+; VI: v_add_u16_sdwa v{{[0-9]+}}, v{{[0-9]+}}, v[[K]] dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD
 ; VI-NOT: v_add_u16
 ; VI: v_or_b32_e32
 define amdgpu_kernel void @v_test_add_v2i16_inline_fp_split(<2 x i16> addrspace(1)* %out, <2 x i16> addrspace(1)* %in0) #1 {
@@ -155,8 +155,8 @@ define amdgpu_kernel void @v_test_add_v2i16_inline_fp_split(<2 x i16> addrspace(
 
 ; FIXME: Need to handle non-uniform case for function below (load without gep).
 ; GCN-LABEL: {{^}}v_test_add_v2i16_zext_to_v2i32:
-; GFX9: flat_load_dword [[A:v[0-9]+]]
-; GFX9: flat_load_dword [[B:v[0-9]+]]
+; GFX9: global_load_dword [[A:v[0-9]+]]
+; GFX9: global_load_dword [[B:v[0-9]+]]
 
 ; GFX9: v_pk_add_u16 [[ADD:v[0-9]+]], [[A]], [[B]]
 ; GFX9-DAG: v_and_b32_e32 v[[ELT0:[0-9]+]], 0xffff, [[ADD]]
@@ -168,10 +168,10 @@ define amdgpu_kernel void @v_test_add_v2i16_inline_fp_split(<2 x i16> addrspace(
 ; VI: flat_load_ushort v[[B_HI:[0-9]+]]
 ; VI: flat_load_ushort v[[B_LO:[0-9]+]]
 
-; VI: v_add_u16_e32 v[[ADD_HI:[0-9]+]], v[[B_HI]], v[[A_HI]]
+; VI: v_add_u16_e32 v[[ADD_HI:[0-9]+]], v[[A_HI]], v[[B_HI]]
 ; VI-NOT: and
 ; VI-NOT: shl
-; VI: v_add_u16_e32 v[[ADD_LO:[0-9]+]], v[[B_LO]], v[[A_LO]]
+; VI: v_add_u16_e32 v[[ADD_LO:[0-9]+]], v[[A_LO]], v[[B_LO]]
 ; VI-NOT: and
 ; VI-NOT: shl
 ; VI: buffer_store_dwordx2 v{{\[}}[[ADD_LO]]:[[ADD_HI]]{{\]}}
@@ -190,8 +190,8 @@ define amdgpu_kernel void @v_test_add_v2i16_zext_to_v2i32(<2 x i32> addrspace(1)
 
 ; FIXME: Need to handle non-uniform case for function below (load without gep).
 ; GCN-LABEL: {{^}}v_test_add_v2i16_zext_to_v2i64:
-; GFX9: flat_load_dword [[A:v[0-9]+]]
-; GFX9: flat_load_dword [[B:v[0-9]+]]
+; GFX9: global_load_dword [[A:v[0-9]+]]
+; GFX9: global_load_dword [[B:v[0-9]+]]
 
 ; GFX9: v_pk_add_u16 [[ADD:v[0-9]+]], [[A]], [[B]]
 ; GFX9-DAG: v_and_b32_e32 v[[ELT0:[0-9]+]], 0xffff, [[ADD]]
@@ -223,8 +223,8 @@ define amdgpu_kernel void @v_test_add_v2i16_zext_to_v2i64(<2 x i64> addrspace(1)
 
 ; FIXME: Need to handle non-uniform case for function below (load without gep).
 ; GCN-LABEL: {{^}}v_test_add_v2i16_sext_to_v2i32:
-; GFX9: flat_load_dword [[A:v[0-9]+]]
-; GFX9: flat_load_dword [[B:v[0-9]+]]
+; GFX9: global_load_dword [[A:v[0-9]+]]
+; GFX9: global_load_dword [[B:v[0-9]+]]
 
 ; GFX9: v_pk_add_u16 [[ADD:v[0-9]+]], [[A]], [[B]]
 ; GFX9-DAG: v_bfe_i32 v[[ELT0:[0-9]+]], [[ADD]], 0, 16
@@ -251,8 +251,8 @@ define amdgpu_kernel void @v_test_add_v2i16_sext_to_v2i32(<2 x i32> addrspace(1)
 
 ; FIXME: Need to handle non-uniform case for function below (load without gep).
 ; GCN-LABEL: {{^}}v_test_add_v2i16_sext_to_v2i64:
-; GCN: flat_load_dword
-; GCN: flat_load_dword
+; GCN: {{flat|global}}_load_dword
+; GCN: {{flat|global}}_load_dword
 
 ; GFX9: v_pk_add_u16
 ; GFX9: v_lshrrev_b32_e32 v{{[0-9]+}}, 16, v{{[0-9]+}}

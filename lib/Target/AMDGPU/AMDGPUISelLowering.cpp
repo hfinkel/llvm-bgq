@@ -20,7 +20,9 @@
 #include "AMDGPUIntrinsicInfo.h"
 #include "AMDGPURegisterInfo.h"
 #include "AMDGPUSubtarget.h"
+#include "AMDGPUTargetMachine.h"
 #include "R600MachineFunctionInfo.h"
+#include "SIInstrInfo.h"
 #include "SIMachineFunctionInfo.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -30,7 +32,6 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/Support/KnownBits.h"
-#include "SIInstrInfo.h"
 using namespace llvm;
 
 static bool allocateKernArg(unsigned ValNo, MVT ValVT, MVT LocVT,
@@ -573,6 +574,8 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(const TargetMachine &TM,
   setTargetDAGCombine(ISD::FSUB);
   setTargetDAGCombine(ISD::FNEG);
   setTargetDAGCombine(ISD::FABS);
+  setTargetDAGCombine(ISD::AssertZext);
+  setTargetDAGCombine(ISD::AssertSext);
 }
 
 //===----------------------------------------------------------------------===//
@@ -848,6 +851,7 @@ CCAssignFn *AMDGPUCallLowering::CCAssignFnForCall(CallingConv::ID CC,
     return CC_AMDGPU;
   case CallingConv::C:
   case CallingConv::Fast:
+  case CallingConv::Cold:
     return CC_AMDGPU_Func;
   default:
     report_fatal_error("Unsupported calling convention.");
@@ -868,6 +872,7 @@ CCAssignFn *AMDGPUCallLowering::CCAssignFnForReturn(CallingConv::ID CC,
     return RetCC_SI_Shader;
   case CallingConv::C:
   case CallingConv::Fast:
+  case CallingConv::Cold:
     return RetCC_AMDGPU_Func;
   default:
     report_fatal_error("Unsupported calling convention.");
@@ -883,7 +888,7 @@ CCAssignFn *AMDGPUCallLowering::CCAssignFnForReturn(CallingConv::ID CC,
 
 /// When the SelectionDAGBuilder computes the Ins, it takes care of splitting
 /// input values across multiple registers.  Each item in the Ins array
-/// represents a single value that will be stored in regsters.  Ins[x].VT is
+/// represents a single value that will be stored in registers.  Ins[x].VT is
 /// the value type of the value that will be stored in the register, so
 /// whatever SDNode we lower the argument to needs to be this type.
 ///
@@ -998,8 +1003,45 @@ CCAssignFn *AMDGPUTargetLowering::CCAssignFnForReturn(CallingConv::ID CC,
   return AMDGPUCallLowering::CCAssignFnForReturn(CC, IsVarArg);
 }
 
-SDValue AMDGPUTargetLowering::LowerCall(CallLoweringInfo &CLI,
-                                        SmallVectorImpl<SDValue> &InVals) const {
+SDValue AMDGPUTargetLowering::addTokenForArgument(SDValue Chain,
+                                                  SelectionDAG &DAG,
+                                                  MachineFrameInfo &MFI,
+                                                  int ClobberedFI) const {
+  SmallVector<SDValue, 8> ArgChains;
+  int64_t FirstByte = MFI.getObjectOffset(ClobberedFI);
+  int64_t LastByte = FirstByte + MFI.getObjectSize(ClobberedFI) - 1;
+
+  // Include the original chain at the beginning of the list. When this is
+  // used by target LowerCall hooks, this helps legalize find the
+  // CALLSEQ_BEGIN node.
+  ArgChains.push_back(Chain);
+
+  // Add a chain value for each stack argument corresponding
+  for (SDNode::use_iterator U = DAG.getEntryNode().getNode()->use_begin(),
+                            UE = DAG.getEntryNode().getNode()->use_end();
+       U != UE; ++U) {
+    if (LoadSDNode *L = dyn_cast<LoadSDNode>(*U)) {
+      if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(L->getBasePtr())) {
+        if (FI->getIndex() < 0) {
+          int64_t InFirstByte = MFI.getObjectOffset(FI->getIndex());
+          int64_t InLastByte = InFirstByte;
+          InLastByte += MFI.getObjectSize(FI->getIndex()) - 1;
+
+          if ((InFirstByte <= FirstByte && FirstByte <= InLastByte) ||
+              (FirstByte <= InFirstByte && InFirstByte <= LastByte))
+            ArgChains.push_back(SDValue(L, 1));
+        }
+      }
+    }
+  }
+
+  // Build a tokenfactor for all the chains.
+  return DAG.getNode(ISD::TokenFactor, SDLoc(Chain), MVT::Other, ArgChains);
+}
+
+SDValue AMDGPUTargetLowering::lowerUnhandledCall(CallLoweringInfo &CLI,
+                                                 SmallVectorImpl<SDValue> &InVals,
+                                                 StringRef Reason) const {
   SDValue Callee = CLI.Callee;
   SelectionDAG &DAG = CLI.DAG;
 
@@ -1013,7 +1055,7 @@ SDValue AMDGPUTargetLowering::LowerCall(CallLoweringInfo &CLI,
     FuncName = G->getGlobal()->getName();
 
   DiagnosticInfoUnsupported NoCalls(
-      Fn, "unsupported call to function " + FuncName, CLI.DL.getDebugLoc());
+    Fn, Reason + FuncName, CLI.DL.getDebugLoc());
   DAG.getContext()->diagnose(NoCalls);
 
   if (!CLI.IsTailCall) {
@@ -1022,6 +1064,11 @@ SDValue AMDGPUTargetLowering::LowerCall(CallLoweringInfo &CLI,
   }
 
   return DAG.getEntryNode();
+}
+
+SDValue AMDGPUTargetLowering::LowerCall(CallLoweringInfo &CLI,
+                                        SmallVectorImpl<SDValue> &InVals) const {
+  return lowerUnhandledCall(CLI, InVals, "unsupported call to function ");
 }
 
 SDValue AMDGPUTargetLowering::LowerDYNAMIC_STACKALLOC(SDValue Op,
@@ -2591,6 +2638,31 @@ SDValue AMDGPUTargetLowering::performClampCombine(SDNode *N,
   return SDValue(CSrc, 0);
 }
 
+// FIXME: This should go in generic DAG combiner with an isTruncateFree check,
+// but isTruncateFree is inaccurate for i16 now because of SALU vs. VALU
+// issues.
+SDValue AMDGPUTargetLowering::performAssertSZExtCombine(SDNode *N,
+                                                        DAGCombinerInfo &DCI) const {
+  SelectionDAG &DAG = DCI.DAG;
+  SDValue N0 = N->getOperand(0);
+
+  // (vt2 (assertzext (truncate vt0:x), vt1)) ->
+  //     (vt2 (truncate (assertzext vt0:x, vt1)))
+  if (N0.getOpcode() == ISD::TRUNCATE) {
+    SDValue N1 = N->getOperand(1);
+    EVT ExtVT = cast<VTSDNode>(N1)->getVT();
+    SDLoc SL(N);
+
+    SDValue Src = N0.getOperand(0);
+    EVT SrcVT = Src.getValueType();
+    if (SrcVT.bitsGE(ExtVT)) {
+      SDValue NewInReg = DAG.getNode(N->getOpcode(), SL, SrcVT, Src, N1);
+      return DAG.getNode(ISD::TRUNCATE, SL, N->getValueType(0), NewInReg);
+    }
+  }
+
+  return SDValue();
+}
 /// Split the 64-bit value \p LHS into two 32-bit components, and perform the
 /// binary operation \p Opc to it with the corresponding constant operands.
 SDValue AMDGPUTargetLowering::splitBinaryBitConstantOpImpl(
@@ -2638,11 +2710,21 @@ SDValue AMDGPUTargetLowering::performShlCombine(SDNode *N,
   case ISD::ZERO_EXTEND:
   case ISD::SIGN_EXTEND:
   case ISD::ANY_EXTEND: {
+    SDValue X = LHS->getOperand(0);
+
+    if (VT == MVT::i32 && RHSVal == 16 && X.getValueType() == MVT::i16 &&
+        isTypeLegal(MVT::v2i16)) {
+      // Prefer build_vector as the canonical form if packed types are legal.
+      // (shl ([asz]ext i16:x), 16 -> build_vector 0, x
+      SDValue Vec = DAG.getBuildVector(MVT::v2i16, SL,
+       { DAG.getConstant(0, SL, MVT::i16), LHS->getOperand(0) });
+      return DAG.getNode(ISD::BITCAST, SL, MVT::i32, Vec);
+    }
+
     // shl (ext x) => zext (shl x), if shift does not overflow int
     if (VT != MVT::i64)
       break;
     KnownBits Known;
-    SDValue X = LHS->getOperand(0);
     DAG.computeKnownBits(X, Known);
     unsigned LZ = Known.countMinLeadingZeros();
     if (LZ < RHSVal)
@@ -2651,8 +2733,11 @@ SDValue AMDGPUTargetLowering::performShlCombine(SDNode *N,
     SDValue Shl = DAG.getNode(ISD::SHL, SL, XVT, X, SDValue(RHS, 0));
     return DAG.getZExtOrTrunc(Shl, SL, VT);
   }
-  case ISD::OR:  if (!isOrEquivalentToAdd(DAG, LHS)) break;
-  case ISD::ADD: { // Fall through from above
+  case ISD::OR:
+    if (!isOrEquivalentToAdd(DAG, LHS))
+      break;
+    LLVM_FALLTHROUGH;
+  case ISD::ADD: {
     // shl (or|add x, c2), c1 => or|add (shl x, c1), (c2 << c1)
     if (ConstantSDNode *C2 = dyn_cast<ConstantSDNode>(LHS->getOperand(1))) {
       SDValue Shl = DAG.getNode(ISD::SHL, SL, VT, LHS->getOperand(0),
@@ -3518,6 +3603,9 @@ SDValue AMDGPUTargetLowering::PerformDAGCombine(SDNode *N,
 
     break;
   }
+  case ISD::AssertZext:
+  case ISD::AssertSext:
+    return performAssertSZExtCombine(N, DCI);
   }
   return SDValue();
 }
@@ -3527,18 +3615,68 @@ SDValue AMDGPUTargetLowering::PerformDAGCombine(SDNode *N,
 //===----------------------------------------------------------------------===//
 
 SDValue AMDGPUTargetLowering::CreateLiveInRegister(SelectionDAG &DAG,
-                                                  const TargetRegisterClass *RC,
-                                                   unsigned Reg, EVT VT) const {
+                                                   const TargetRegisterClass *RC,
+                                                   unsigned Reg, EVT VT,
+                                                   const SDLoc &SL,
+                                                   bool RawReg) const {
   MachineFunction &MF = DAG.getMachineFunction();
   MachineRegisterInfo &MRI = MF.getRegInfo();
-  unsigned VirtualRegister;
+  unsigned VReg;
+
   if (!MRI.isLiveIn(Reg)) {
-    VirtualRegister = MRI.createVirtualRegister(RC);
-    MRI.addLiveIn(Reg, VirtualRegister);
+    VReg = MRI.createVirtualRegister(RC);
+    MRI.addLiveIn(Reg, VReg);
   } else {
-    VirtualRegister = MRI.getLiveInVirtReg(Reg);
+    VReg = MRI.getLiveInVirtReg(Reg);
   }
-  return DAG.getRegister(VirtualRegister, VT);
+
+  if (RawReg)
+    return DAG.getRegister(VReg, VT);
+
+  return DAG.getCopyFromReg(DAG.getEntryNode(), SL, VReg, VT);
+}
+
+SDValue AMDGPUTargetLowering::loadStackInputValue(SelectionDAG &DAG,
+                                                  EVT VT,
+                                                  const SDLoc &SL,
+                                                  int64_t Offset) const {
+  MachineFunction &MF = DAG.getMachineFunction();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+
+  int FI = MFI.CreateFixedObject(VT.getStoreSize(), Offset, true);
+  auto SrcPtrInfo = MachinePointerInfo::getStack(MF, Offset);
+  SDValue Ptr = DAG.getFrameIndex(FI, MVT::i32);
+
+  return DAG.getLoad(VT, SL, DAG.getEntryNode(), Ptr, SrcPtrInfo, 4,
+                     MachineMemOperand::MODereferenceable |
+                     MachineMemOperand::MOInvariant);
+}
+
+SDValue AMDGPUTargetLowering::storeStackInputValue(SelectionDAG &DAG,
+                                                   const SDLoc &SL,
+                                                   SDValue Chain,
+                                                   SDValue StackPtr,
+                                                   SDValue ArgVal,
+                                                   int64_t Offset) const {
+  MachineFunction &MF = DAG.getMachineFunction();
+  MachinePointerInfo DstInfo = MachinePointerInfo::getStack(MF, Offset);
+  SDValue PtrOffset = DAG.getConstant(Offset, SL, MVT::i32);
+  SDValue Ptr = DAG.getNode(ISD::ADD, SL, MVT::i32, StackPtr, PtrOffset);
+
+  SDValue Store = DAG.getStore(Chain, SL, ArgVal, Ptr, DstInfo, 4,
+                               MachineMemOperand::MODereferenceable);
+  return Store;
+}
+
+SDValue AMDGPUTargetLowering::loadInputValue(SelectionDAG &DAG,
+                                             const TargetRegisterClass *RC,
+                                             EVT VT, const SDLoc &SL,
+                                             const ArgDescriptor &Arg) const {
+  assert(Arg && "Attempting to load missing argument");
+
+  if (Arg.isRegister())
+    return CreateLiveInRegister(DAG, RC, Arg.getRegister(), VT, SL);
+  return loadStackInputValue(DAG, VT, SL, Arg.getStackOffset());
 }
 
 uint32_t AMDGPUTargetLowering::getImplicitParameterOffset(
@@ -3568,6 +3706,7 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(ELSE)
   NODE_NAME_CASE(LOOP)
   NODE_NAME_CASE(CALL)
+  NODE_NAME_CASE(TC_RETURN)
   NODE_NAME_CASE(TRAP)
   NODE_NAME_CASE(RET_FLAG)
   NODE_NAME_CASE(RETURN_TO_EPILOG)
@@ -3657,6 +3796,8 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(STORE_MSKOR)
   NODE_NAME_CASE(LOAD_CONSTANT)
   NODE_NAME_CASE(TBUFFER_STORE_FORMAT)
+  NODE_NAME_CASE(TBUFFER_STORE_FORMAT_X3)
+  NODE_NAME_CASE(TBUFFER_LOAD_FORMAT)
   NODE_NAME_CASE(ATOMIC_CMP_SWAP)
   NODE_NAME_CASE(ATOMIC_INC)
   NODE_NAME_CASE(ATOMIC_DEC)
@@ -3712,7 +3853,6 @@ void AMDGPUTargetLowering::computeKnownBitsForTargetNode(
 
   Known.resetAll(); // Don't know anything.
 
-  KnownBits Known2;
   unsigned Opc = Op.getOpcode();
 
   switch (Opc) {
@@ -3743,6 +3883,37 @@ void AMDGPUTargetLowering::computeKnownBitsForTargetNode(
 
     // High bits are zero.
     Known.Zero = APInt::getHighBitsSet(BitWidth, BitWidth - 16);
+    break;
+  }
+  case AMDGPUISD::MUL_U24:
+  case AMDGPUISD::MUL_I24: {
+    KnownBits LHSKnown, RHSKnown;
+    DAG.computeKnownBits(Op.getOperand(0), LHSKnown, Depth + 1);
+    DAG.computeKnownBits(Op.getOperand(1), RHSKnown, Depth + 1);
+
+    unsigned TrailZ = LHSKnown.countMinTrailingZeros() +
+                      RHSKnown.countMinTrailingZeros();
+    Known.Zero.setLowBits(std::min(TrailZ, 32u));
+
+    unsigned LHSValBits = 32 - std::max(LHSKnown.countMinSignBits(), 8u);
+    unsigned RHSValBits = 32 - std::max(RHSKnown.countMinSignBits(), 8u);
+    unsigned MaxValBits = std::min(LHSValBits + RHSValBits, 32u);
+    if (MaxValBits >= 32)
+      break;
+    bool Negative = false;
+    if (Opc == AMDGPUISD::MUL_I24) {
+      bool LHSNegative = !!(LHSKnown.One  & (1 << 23));
+      bool LHSPositive = !!(LHSKnown.Zero & (1 << 23));
+      bool RHSNegative = !!(RHSKnown.One  & (1 << 23));
+      bool RHSPositive = !!(RHSKnown.Zero & (1 << 23));
+      if ((!LHSNegative && !LHSPositive) || (!RHSNegative && !RHSPositive))
+        break;
+      Negative = (LHSNegative && RHSPositive) || (LHSPositive && RHSNegative);
+    }
+    if (Negative)
+      Known.One.setHighBits(32 - MaxValBits);
+    else
+      Known.Zero.setHighBits(32 - MaxValBits);
     break;
   }
   }

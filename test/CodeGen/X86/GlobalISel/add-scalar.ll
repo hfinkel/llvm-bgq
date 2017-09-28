@@ -18,18 +18,10 @@ define i64 @test_add_i64(i64 %arg1, i64 %arg2) {
 ; X32-NEXT:    movl %esp, %ebp
 ; X32-NEXT:  .Lcfi2:
 ; X32-NEXT:    .cfi_def_cfa_register %ebp
-; X32-NEXT:    pushl %esi
-; X32-NEXT:  .Lcfi3:
-; X32-NEXT:    .cfi_offset %esi, -12
-; X32-NEXT:    leal 8(%ebp), %ecx
-; X32-NEXT:    leal 12(%ebp), %esi
-; X32-NEXT:    leal 16(%ebp), %eax
-; X32-NEXT:    movl (%eax), %eax
-; X32-NEXT:    leal 20(%ebp), %edx
-; X32-NEXT:    movl (%edx), %edx
-; X32-NEXT:    addl (%ecx), %eax
-; X32-NEXT:    adcl (%esi), %edx
-; X32-NEXT:    popl %esi
+; X32-NEXT:    movl 16(%ebp), %eax
+; X32-NEXT:    movl 20(%ebp), %edx
+; X32-NEXT:    addl 8(%ebp), %eax
+; X32-NEXT:    adcl 12(%ebp), %edx
 ; X32-NEXT:    popl %ebp
 ; X32-NEXT:    retl
   %ret = add i64 %arg1, %arg2
@@ -46,10 +38,8 @@ define i32 @test_add_i32(i32 %arg1, i32 %arg2) {
 ;
 ; X32-LABEL: test_add_i32:
 ; X32:       # BB#0:
-; X32-NEXT:    leal 4(%esp), %ecx
-; X32-NEXT:    leal 8(%esp), %eax
-; X32-NEXT:    movl (%eax), %eax
-; X32-NEXT:    addl (%ecx), %eax
+; X32-NEXT:    movl 8(%esp), %eax
+; X32-NEXT:    addl 4(%esp), %eax
 ; X32-NEXT:    retl
   %ret = add i32 %arg1, %arg2
   ret i32 %ret
@@ -66,10 +56,8 @@ define i16 @test_add_i16(i16 %arg1, i16 %arg2) {
 ;
 ; X32-LABEL: test_add_i16:
 ; X32:       # BB#0:
-; X32-NEXT:    leal 4(%esp), %ecx
-; X32-NEXT:    leal 8(%esp), %eax
-; X32-NEXT:    movzwl (%eax), %eax
-; X32-NEXT:    addw (%ecx), %ax
+; X32-NEXT:    movzwl 8(%esp), %eax
+; X32-NEXT:    addw 4(%esp), %ax
 ; X32-NEXT:    retl
   %ret = add i16 %arg1, %arg2
   ret i16 %ret
@@ -84,11 +72,32 @@ define i8 @test_add_i8(i8 %arg1, i8 %arg2) {
 ;
 ; X32-LABEL: test_add_i8:
 ; X32:       # BB#0:
-; X32-NEXT:    leal 4(%esp), %ecx
-; X32-NEXT:    leal 8(%esp), %eax
-; X32-NEXT:    movb (%eax), %al
-; X32-NEXT:    addb (%ecx), %al
+; X32-NEXT:    movb 8(%esp), %al
+; X32-NEXT:    addb 4(%esp), %al
 ; X32-NEXT:    retl
   %ret = add i8 %arg1, %arg2
   ret i8 %ret
+}
+
+define i32 @test_add_i1(i32 %arg1, i32 %arg2) {
+; X64-LABEL: test_add_i1:
+; X64:       # BB#0:
+; X64-NEXT:    cmpl %esi, %edi
+; X64-NEXT:    sete %al
+; X64-NEXT:    addb %al, %al
+; X64-NEXT:    andl $1, %eax
+; X64-NEXT:    retq
+;
+; X32-LABEL: test_add_i1:
+; X32:       # BB#0:
+; X32-NEXT:    movl 8(%esp), %eax
+; X32-NEXT:    cmpl %eax, 4(%esp)
+; X32-NEXT:    sete %al
+; X32-NEXT:    addb %al, %al
+; X32-NEXT:    andl $1, %eax
+; X32-NEXT:    retl
+  %c = icmp eq i32 %arg1, %arg2
+  %x = add i1 %c , %c
+  %ret = zext i1 %x to i32
+  ret i32 %ret
 }

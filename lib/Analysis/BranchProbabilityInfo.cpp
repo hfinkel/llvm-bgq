@@ -1,4 +1,4 @@
-//===-- BranchProbabilityInfo.cpp - Branch Probability Analysis -----------===//
+//===- BranchProbabilityInfo.cpp - Branch Probability Analysis ------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,23 +13,50 @@
 
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Value.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/BranchProbability.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cassert>
+#include <cstdint>
+#include <iterator>
+#include <utility>
 
 using namespace llvm;
 
 #define DEBUG_TYPE "branch-prob"
 
+static cl::opt<bool> PrintBranchProb(
+    "print-bpi", cl::init(false), cl::Hidden,
+    cl::desc("Print the branch probability info."));
+
+cl::opt<std::string> PrintBranchProbFuncName(
+    "print-bpi-func-name", cl::Hidden,
+    cl::desc("The option to specify the name of the function "
+             "whose branch probability info is printed."));
+
 INITIALIZE_PASS_BEGIN(BranchProbabilityInfoWrapperPass, "branch-prob",
                       "Branch Probability Analysis", false, true)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(BranchProbabilityInfoWrapperPass, "branch-prob",
                     "Branch Probability Analysis", false, true)
 
@@ -219,7 +246,7 @@ bool BranchProbabilityInfo::calcUnreachableHeuristics(const BasicBlock *BB) {
 bool BranchProbabilityInfo::calcMetadataWeights(const BasicBlock *BB) {
   const TerminatorInst *TI = BB->getTerminator();
   assert(TI->getNumSuccessors() > 1 && "expected more than one successor!");
-  if (!isa<BranchInst>(TI) && !isa<SwitchInst>(TI))
+  if (!(isa<BranchInst>(TI) || isa<SwitchInst>(TI) || isa<IndirectBrInst>(TI)))
     return false;
 
   MDNode *WeightsNode = TI->getMetadata(LLVMContext::MD_prof);
@@ -457,7 +484,8 @@ bool BranchProbabilityInfo::calcLoopBranchHeuristics(const BasicBlock *BB,
   return true;
 }
 
-bool BranchProbabilityInfo::calcZeroHeuristics(const BasicBlock *BB) {
+bool BranchProbabilityInfo::calcZeroHeuristics(const BasicBlock *BB,
+                                               const TargetLibraryInfo *TLI) {
   const BranchInst *BI = dyn_cast<BranchInst>(BB->getTerminator());
   if (!BI || !BI->isConditional())
     return false;
@@ -477,11 +505,40 @@ bool BranchProbabilityInfo::calcZeroHeuristics(const BasicBlock *BB) {
   if (Instruction *LHS = dyn_cast<Instruction>(CI->getOperand(0)))
     if (LHS->getOpcode() == Instruction::And)
       if (ConstantInt *AndRHS = dyn_cast<ConstantInt>(LHS->getOperand(1)))
-        if (AndRHS->getUniqueInteger().isPowerOf2())
+        if (AndRHS->getValue().isPowerOf2())
           return false;
 
+  // Check if the LHS is the return value of a library function
+  LibFunc Func = NumLibFuncs;
+  if (TLI)
+    if (CallInst *Call = dyn_cast<CallInst>(CI->getOperand(0)))
+      if (Function *CalledFn = Call->getCalledFunction())
+        TLI->getLibFunc(*CalledFn, Func);
+
   bool isProb;
-  if (CV->isZero()) {
+  if (Func == LibFunc_strcasecmp ||
+      Func == LibFunc_strcmp ||
+      Func == LibFunc_strncasecmp ||
+      Func == LibFunc_strncmp ||
+      Func == LibFunc_memcmp) {
+    // strcmp and similar functions return zero, negative, or positive, if the
+    // first string is equal, less, or greater than the second. We consider it
+    // likely that the strings are not equal, so a comparison with zero is
+    // probably false, but also a comparison with any other number is also
+    // probably false given that what exactly is returned for nonzero values is
+    // not specified. Any kind of comparison other than equality we know
+    // nothing about.
+    switch (CI->getPredicate()) {
+    case CmpInst::ICMP_EQ:
+      isProb = false;
+      break;
+    case CmpInst::ICMP_NE:
+      isProb = true;
+      break;
+    default:
+      return false;
+    }
+  } else if (CV->isZero()) {
     switch (CI->getPredicate()) {
     case CmpInst::ICMP_EQ:
       // X == 0   ->  Unlikely
@@ -506,7 +563,7 @@ bool BranchProbabilityInfo::calcZeroHeuristics(const BasicBlock *BB) {
     // InstCombine canonicalizes X <= 0 into X < 1.
     // X <= 0   ->  Unlikely
     isProb = false;
-  } else if (CV->isAllOnesValue()) {
+  } else if (CV->isMinusOne()) {
     switch (CI->getPredicate()) {
     case CmpInst::ICMP_EQ:
       // X == -1  ->  Unlikely
@@ -690,7 +747,6 @@ raw_ostream &
 BranchProbabilityInfo::printEdgeProbability(raw_ostream &OS,
                                             const BasicBlock *Src,
                                             const BasicBlock *Dst) const {
-
   const BranchProbability Prob = getEdgeProbability(Src, Dst);
   OS << "edge " << Src->getName() << " -> " << Dst->getName()
      << " probability is " << Prob
@@ -707,7 +763,8 @@ void BranchProbabilityInfo::eraseBlock(const BasicBlock *BB) {
   }
 }
 
-void BranchProbabilityInfo::calculate(const Function &F, const LoopInfo &LI) {
+void BranchProbabilityInfo::calculate(const Function &F, const LoopInfo &LI,
+                                      const TargetLibraryInfo *TLI) {
   DEBUG(dbgs() << "---- Branch Probability Info : " << F.getName()
                << " ----\n\n");
   LastF = &F; // Store the last function we ran on for printing.
@@ -733,7 +790,7 @@ void BranchProbabilityInfo::calculate(const Function &F, const LoopInfo &LI) {
       continue;
     if (calcPointerHeuristics(BB))
       continue;
-    if (calcZeroHeuristics(BB))
+    if (calcZeroHeuristics(BB, TLI))
       continue;
     if (calcFloatingPointHeuristics(BB))
       continue;
@@ -742,17 +799,25 @@ void BranchProbabilityInfo::calculate(const Function &F, const LoopInfo &LI) {
 
   PostDominatedByUnreachable.clear();
   PostDominatedByColdCall.clear();
+
+  if (PrintBranchProb &&
+      (PrintBranchProbFuncName.empty() ||
+       F.getName().equals(PrintBranchProbFuncName))) {
+    print(dbgs());
+  }
 }
 
 void BranchProbabilityInfoWrapperPass::getAnalysisUsage(
     AnalysisUsage &AU) const {
   AU.addRequired<LoopInfoWrapperPass>();
+  AU.addRequired<TargetLibraryInfoWrapperPass>();
   AU.setPreservesAll();
 }
 
 bool BranchProbabilityInfoWrapperPass::runOnFunction(Function &F) {
   const LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  BPI.calculate(F, LI);
+  const TargetLibraryInfo &TLI = getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+  BPI.calculate(F, LI, &TLI);
   return false;
 }
 
@@ -767,7 +832,7 @@ AnalysisKey BranchProbabilityAnalysis::Key;
 BranchProbabilityInfo
 BranchProbabilityAnalysis::run(Function &F, FunctionAnalysisManager &AM) {
   BranchProbabilityInfo BPI;
-  BPI.calculate(F, AM.getResult<LoopAnalysis>(F));
+  BPI.calculate(F, AM.getResult<LoopAnalysis>(F), &AM.getResult<TargetLibraryAnalysis>(F));
   return BPI;
 }
 

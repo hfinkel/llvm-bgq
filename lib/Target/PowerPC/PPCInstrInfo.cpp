@@ -46,6 +46,12 @@ using namespace llvm;
 #define GET_INSTRINFO_CTOR_DTOR
 #include "PPCGenInstrInfo.inc"
 
+STATISTIC(NumStoreSPILLVSRRCAsVec,
+          "Number of spillvsrrc spilled to stack as vec");
+STATISTIC(NumStoreSPILLVSRRCAsGpr,
+          "Number of spillvsrrc spilled to stack as gpr");
+STATISTIC(NumGPRtoVSRSpill, "Number of gpr spills to spillvsrrc");
+
 static cl::
 opt<bool> DisableCTRLoopAnal("disable-ppc-ctrloop-analysis", cl::Hidden,
             cl::desc("Disable analysis for CTR loops"));
@@ -280,6 +286,7 @@ unsigned PPCInstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
   case PPC::QVLFSXs:
   case PPC::QVLFDXb:
   case PPC::RESTORE_VRSAVE:
+  case PPC::SPILLTOVSR_LD:
     // Check for the operands added by addFrameReference (the immediate is the
     // offset which defaults to 0).
     if (MI.getOperand(1).isImm() && !MI.getOperand(1).getImm() &&
@@ -290,6 +297,29 @@ unsigned PPCInstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
     break;
   }
   return 0;
+}
+
+// For opcodes with the ReMaterializable flag set, this function is called to
+// verify the instruction is really rematable.  
+bool PPCInstrInfo::isReallyTriviallyReMaterializable(const MachineInstr &MI,
+                                                     AliasAnalysis *AA) const {
+  switch (MI.getOpcode()) {
+  default: 
+    // This function should only be called for opcodes with the ReMaterializable
+    // flag set.
+    llvm_unreachable("Unknown rematerializable operation!");
+    break;
+  case PPC::LI:
+  case PPC::LI8:
+  case PPC::LIS:
+  case PPC::LIS8:
+  case PPC::QVGPCI:
+  case PPC::ADDIStocHA:
+  case PPC::ADDItocL:
+  case PPC::LOAD_STACK_GUARD:
+    return true;
+  }
+  return false;
 }
 
 unsigned PPCInstrInfo::isStoreToStackSlot(const MachineInstr &MI,
@@ -310,6 +340,7 @@ unsigned PPCInstrInfo::isStoreToStackSlot(const MachineInstr &MI,
   case PPC::QVSTFSXs:
   case PPC::QVSTFDXb:
   case PPC::SPILL_VRSAVE:
+  case PPC::SPILLTOVSR_ST:
     // Check for the operands added by addFrameReference (the immediate is the
     // offset which defaults to 0).
     if (MI.getOperand(1).isImm() && !MI.getOperand(1).getImm() &&
@@ -462,6 +493,20 @@ bool PPCInstrInfo::analyzeBranch(MachineBasicBlock &MBB,
 
   if (!isUnpredicatedTerminator(*I))
     return false;
+
+  if (AllowModify) {
+    // If the BB ends with an unconditional branch to the fallthrough BB,
+    // we eliminate the branch instruction.
+    if (I->getOpcode() == PPC::B &&
+        MBB.isLayoutSuccessor(I->getOperand(0).getMBB())) {
+      I->eraseFromParent();
+
+      // We update iterator after deleting the last branch.
+      I = MBB.getLastNonDebugInstr();
+      if (I == MBB.end() || !isUnpredicatedTerminator(*I))
+        return false;
+    }
+  }
 
   // Get the last instruction in the block.
   MachineInstr &LastInst = *I;
@@ -894,7 +939,18 @@ void PPCInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     BuildMI(MBB, I, DL, get(PPC::MFOCRF), DestReg).addReg(SrcReg);
     getKillRegState(KillSrc);
     return;
-   }
+  } else if (PPC::G8RCRegClass.contains(SrcReg) &&
+             PPC::VSFRCRegClass.contains(DestReg)) {
+    BuildMI(MBB, I, DL, get(PPC::MTVSRD), DestReg).addReg(SrcReg);
+    NumGPRtoVSRSpill++;
+    getKillRegState(KillSrc);
+    return;
+  } else if (PPC::VSFRCRegClass.contains(SrcReg) &&
+             PPC::G8RCRegClass.contains(DestReg)) {
+    BuildMI(MBB, I, DL, get(PPC::MFVSRD), DestReg).addReg(SrcReg);
+    getKillRegState(KillSrc);
+    return;
+  }
 
   unsigned Opc;
   if (PPC::GPRCRegClass.contains(DestReg, SrcReg))
@@ -1038,6 +1094,11 @@ PPCInstrInfo::StoreRegToStackSlot(MachineFunction &MF,
                                                getKillRegState(isKill)),
                                        FrameIdx));
     NonRI = true;
+  } else if (PPC::SPILLTOVSRRCRegClass.hasSubClassEq(RC)) {
+    NewMIs.push_back(addFrameReference(BuildMI(MF, DL, get(PPC::SPILLTOVSR_ST))
+                                       .addReg(SrcReg,
+                                               getKillRegState(isKill)),
+                                       FrameIdx));
   } else {
     llvm_unreachable("Unknown regclass!");
   }
@@ -1159,6 +1220,9 @@ bool PPCInstrInfo::LoadRegFromStackSlot(MachineFunction &MF, const DebugLoc &DL,
     NewMIs.push_back(addFrameReference(BuildMI(MF, DL, get(PPC::QVLFDXb), DestReg),
                                        FrameIdx));
     NonRI = true;
+  } else if (PPC::SPILLTOVSRRCRegClass.hasSubClassEq(RC)) {
+    NewMIs.push_back(addFrameReference(BuildMI(MF, DL, get(PPC::SPILLTOVSR_LD),
+                                               DestReg), FrameIdx));
   } else {
     llvm_unreachable("Unknown regclass!");
   }
@@ -1612,12 +1676,15 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
   if (equalityOnly) {
     // We need to check the uses of the condition register in order to reject
     // non-equality comparisons.
-    for (MachineRegisterInfo::use_instr_iterator I =MRI->use_instr_begin(CRReg),
-         IE = MRI->use_instr_end(); I != IE; ++I) {
+    for (MachineRegisterInfo::use_instr_iterator
+         I = MRI->use_instr_begin(CRReg), IE = MRI->use_instr_end();
+         I != IE; ++I) {
       MachineInstr *UseMI = &*I;
       if (UseMI->getOpcode() == PPC::BCC) {
-        unsigned Pred = UseMI->getOperand(0).getImm();
-        if (Pred != PPC::PRED_EQ && Pred != PPC::PRED_NE)
+        PPC::Predicate Pred = (PPC::Predicate)UseMI->getOperand(0).getImm();
+        unsigned PredCond = PPC::getPredicateCondition(Pred);
+        // We ignore hint bits when checking for non-equality comparisons.
+        if (PredCond != PPC::PRED_EQ && PredCond != PPC::PRED_NE)
           return false;
       } else if (UseMI->getOpcode() == PPC::ISEL ||
                  UseMI->getOpcode() == PPC::ISEL8) {
@@ -1635,8 +1702,9 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
   for (MachineBasicBlock::iterator EL = CmpInstr.getParent()->end(); I != EL;
        ++I) {
     bool FoundUse = false;
-    for (MachineRegisterInfo::use_instr_iterator J =MRI->use_instr_begin(CRReg),
-         JE = MRI->use_instr_end(); J != JE; ++J)
+    for (MachineRegisterInfo::use_instr_iterator
+         J = MRI->use_instr_begin(CRReg), JE = MRI->use_instr_end();
+         J != JE; ++J)
       if (&*J == &*I) {
         FoundUse = true;
         break;
@@ -1670,19 +1738,23 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
       MachineInstr *UseMI = &*MRI->use_instr_begin(CRReg);
       if (UseMI->getOpcode() == PPC::BCC) {
         PPC::Predicate Pred = (PPC::Predicate)UseMI->getOperand(0).getImm();
+        unsigned PredCond = PPC::getPredicateCondition(Pred);
+        unsigned PredHint = PPC::getPredicateHint(Pred);
         int16_t Immed = (int16_t)Value;
 
-        if (Immed == -1 && Pred == PPC::PRED_GT) {
+        // When modyfing the condition in the predicate, we propagate hint bits
+        // from the original predicate to the new one.
+        if (Immed == -1 && PredCond == PPC::PRED_GT) {
           // We convert "greater than -1" into "greater than or equal to 0",
           // since we are assuming signed comparison by !equalityOnly
           PredsToUpdate.push_back(std::make_pair(&(UseMI->getOperand(0)),
-                                  PPC::PRED_GE));
+                                  PPC::getPredicate(PPC::PRED_GE, PredHint)));
           Success = true;
         }
-        else if (Immed == 1 && Pred == PPC::PRED_LT) {
+        else if (Immed == 1 && PredCond == PPC::PRED_LT) {
           // We convert "less than 1" into "less than or equal to 0".
           PredsToUpdate.push_back(std::make_pair(&(UseMI->getOperand(0)),
-                                  PPC::PRED_LE));
+                                  PPC::getPredicate(PPC::PRED_LE, PredHint)));
           Success = true;
         }
       }
@@ -1779,9 +1851,11 @@ bool PPCInstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
       MachineInstr *UseMI = &*I;
       if (UseMI->getOpcode() == PPC::BCC) {
         PPC::Predicate Pred = (PPC::Predicate) UseMI->getOperand(0).getImm();
+        unsigned PredCond = PPC::getPredicateCondition(Pred);
         assert((!equalityOnly ||
-                Pred == PPC::PRED_EQ || Pred == PPC::PRED_NE) &&
+                PredCond == PPC::PRED_EQ || PredCond == PPC::PRED_NE) &&
                "Invalid predicate for equality-only optimization");
+        (void)PredCond; // To suppress warning in release build.
         PredsToUpdate.push_back(std::make_pair(&(UseMI->getOperand(0)),
                                 PPC::getSwappedPredicate(Pred)));
       } else if (UseMI->getOpcode() == PPC::ISEL ||
@@ -1962,9 +2036,51 @@ bool PPCInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
     MI.setDesc(get(Opcode));
     return true;
   }
+  case PPC::SPILLTOVSR_LD: {
+    unsigned TargetReg = MI.getOperand(0).getReg();
+    if (PPC::VSFRCRegClass.contains(TargetReg)) {
+      MI.setDesc(get(PPC::DFLOADf64));
+      return expandPostRAPseudo(MI);
+    }
+    else
+      MI.setDesc(get(PPC::LD));
+    return true;
+  }
+  case PPC::SPILLTOVSR_ST: {
+    unsigned SrcReg = MI.getOperand(0).getReg();
+    if (PPC::VSFRCRegClass.contains(SrcReg)) {
+      NumStoreSPILLVSRRCAsVec++;
+      MI.setDesc(get(PPC::DFSTOREf64));
+      return expandPostRAPseudo(MI);
+    } else {
+      NumStoreSPILLVSRRCAsGpr++;
+      MI.setDesc(get(PPC::STD));
+    }
+    return true;
+  }
+  case PPC::SPILLTOVSR_LDX: {
+    unsigned TargetReg = MI.getOperand(0).getReg();
+    if (PPC::VSFRCRegClass.contains(TargetReg))
+      MI.setDesc(get(PPC::LXSDX));
+    else
+      MI.setDesc(get(PPC::LDX));
+    return true;
+  }
+  case PPC::SPILLTOVSR_STX: {
+    unsigned SrcReg = MI.getOperand(0).getReg();
+    if (PPC::VSFRCRegClass.contains(SrcReg)) {
+      NumStoreSPILLVSRRCAsVec++;
+      MI.setDesc(get(PPC::STXSDX));
+    } else {
+      NumStoreSPILLVSRRCAsGpr++;
+      MI.setDesc(get(PPC::STDX));
+    }
+    return true;
+  }
+
   case PPC::CFENCE8: {
     auto Val = MI.getOperand(0).getReg();
-    BuildMI(MBB, MI, DL, get(PPC::CMPW), PPC::CR7).addReg(Val).addReg(Val);
+    BuildMI(MBB, MI, DL, get(PPC::CMPD), PPC::CR7).addReg(Val).addReg(Val);
     BuildMI(MBB, MI, DL, get(PPC::CTRL_DEP))
         .addImm(PPC::PRED_NE_MINUS)
         .addReg(PPC::CR7)

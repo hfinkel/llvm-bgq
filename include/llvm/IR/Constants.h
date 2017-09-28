@@ -68,10 +68,7 @@ protected:
   void *operator new(size_t s) { return User::operator new(s, 0); }
 
 public:
-  ConstantData() = delete;
   ConstantData(const ConstantData &) = delete;
-
-  void *operator new(size_t, unsigned) = delete;
 
   /// Methods to support type inquiry through isa, cast, and dyn_cast.
   static bool classof(const Value *V) {
@@ -194,7 +191,7 @@ public:
   /// common code. It also correctly performs the comparison without the
   /// potential for an assertion from getZExtValue().
   bool isZero() const {
-    return Val == 0;
+    return Val.isNullValue();
   }
 
   /// This is just a convenience method to make client code smaller for a
@@ -202,7 +199,7 @@ public:
   /// potential for an assertion from getZExtValue().
   /// @brief Determine if the value is one.
   bool isOne() const {
-    return Val == 1;
+    return Val.isOneValue();
   }
 
   /// This function will return true iff every bit in this constant is set
@@ -243,7 +240,7 @@ public:
   /// @returns true iff this constant is greater or equal to the given number.
   /// @brief Determine if the value is greater or equal to the given number.
   bool uge(uint64_t Num) const {
-    return Val.getActiveBits() > 64 || Val.getZExtValue() >= Num;
+    return Val.uge(Num);
   }
 
   /// getLimitedValue - If the value is smaller than the specified limit,
@@ -601,6 +598,10 @@ public:
   /// specified element in the low bits of a uint64_t.
   uint64_t getElementAsInteger(unsigned i) const;
 
+  /// If this is a sequential container of integers (of any size), return the
+  /// specified element as an APInt.
+  APInt getElementAsAPInt(unsigned i) const;
+
   /// If this is a sequential container of floating point type, return the
   /// specified element as an APFloat.
   APFloat getElementAsAPFloat(unsigned i) const;
@@ -683,15 +684,8 @@ class ConstantDataArray final : public ConstantDataSequential {
   explicit ConstantDataArray(Type *ty, const char *Data)
       : ConstantDataSequential(ty, ConstantDataArrayVal, Data) {}
 
-  /// Allocate space for exactly zero operands.
-  void *operator new(size_t s) {
-    return User::operator new(s, 0);
-  }
-
 public:
   ConstantDataArray(const ConstantDataArray &) = delete;
-
-  void *operator new(size_t, unsigned) = delete;
 
   /// get() constructors - Return a constant with array type with an element
   /// count and element type matching the ArrayRef passed in.  Note that this
@@ -744,15 +738,8 @@ class ConstantDataVector final : public ConstantDataSequential {
   explicit ConstantDataVector(Type *ty, const char *Data)
       : ConstantDataSequential(ty, ConstantDataVectorVal, Data) {}
 
-  // allocate space for exactly zero operands.
-  void *operator new(size_t s) {
-    return User::operator new(s, 0);
-  }
-
 public:
   ConstantDataVector(const ConstantDataVector &) = delete;
-
-  void *operator new(size_t, unsigned) = delete;
 
   /// get() constructors - Return a constant with vector type with an element
   /// count and element type matching the ArrayRef passed in.  Note that this
@@ -777,6 +764,10 @@ public:
   /// The specified constant has to be a of a compatible type (i8/i16/
   /// i32/i64/float/double) and must be a ConstantFP or ConstantInt.
   static Constant *getSplat(unsigned NumElts, Constant *Elt);
+
+  /// Returns true if this is a splat constant, meaning that all elements have
+  /// the same value.
+  bool isSplat() const;
 
   /// If this is a splat constant, meaning that all of the elements have the
   /// same value, return that value. Otherwise return NULL.
@@ -830,8 +821,6 @@ class BlockAddress final : public Constant {
   Value *handleOperandChangeImpl(Value *From, Value *To);
 
 public:
-  void *operator new(size_t, unsigned) = delete;
-
   /// Return a BlockAddress for the specified function and basic block.
   static BlockAddress *get(Function *F, BasicBlock *BB);
 
@@ -851,7 +840,7 @@ public:
   BasicBlock *getBasicBlock() const { return (BasicBlock*)Op<1>().get(); }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const Value *V) {
+  static bool classof(const Value *V) {
     return V->getValueID() == BlockAddressVal;
   }
 };
@@ -1226,7 +1215,7 @@ public:
   Instruction *getAsInstruction();
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const Value *V) {
+  static bool classof(const Value *V) {
     return V->getValueID() == ConstantExprVal;
   }
 

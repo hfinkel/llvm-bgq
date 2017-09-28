@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "MCTargetDesc/MipsBaseInfo.h"
 #include "Mips16FrameLowering.h"
+#include "MCTargetDesc/MipsBaseInfo.h"
 #include "Mips16InstrInfo.h"
 #include "MipsInstrInfo.h"
 #include "MipsRegisterInfo.h"
@@ -25,10 +25,10 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/IR/DebugLoc.h"
-#include "llvm/MC/MachineLocation.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCRegisterInfo.h"
+#include "llvm/MC/MachineLocation.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Target/TargetFrameLowering.h"
 #include <cassert>
@@ -38,7 +38,7 @@
 using namespace llvm;
 
 Mips16FrameLowering::Mips16FrameLowering(const MipsSubtarget &STI)
-    : MipsFrameLowering(STI, STI.stackAlignment()) {}
+    : MipsFrameLowering(STI, STI.getStackAlignment()) {}
 
 void Mips16FrameLowering::emitPrologue(MachineFunction &MF,
                                        MachineBasicBlock &MBB) const {
@@ -143,7 +143,7 @@ spillCalleeSavedRegisters(MachineBasicBlock &MBB,
 
 bool Mips16FrameLowering::restoreCalleeSavedRegisters(MachineBasicBlock &MBB,
                                           MachineBasicBlock::iterator MI,
-                                       const std::vector<CalleeSavedInfo> &CSI,
+                                       std::vector<CalleeSavedInfo> &CSI,
                                        const TargetRegisterInfo *TRI) const {
   //
   // Registers RA,S0,S1 are the callee saved registers and they will be restored

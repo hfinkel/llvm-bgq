@@ -1,4 +1,4 @@
-//===--- BitTracker.cpp ---------------------------------------------------===//
+//===- BitTracker.cpp -----------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -65,13 +65,13 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetRegisterInfo.h"
-#include <iterator>
 #include <cassert>
 #include <cstdint>
+#include <iterator>
 
 using namespace llvm;
 
-typedef BitTracker BT;
+using BT = BitTracker;
 
 namespace {
 
@@ -335,20 +335,13 @@ uint16_t BT::MachineEvaluator::getRegBitWidth(const RegisterRef &RR) const {
   // 1. find a physical register PhysR from the same class as RR.Reg,
   // 2. find a physical register PhysS that corresponds to PhysR:RR.Sub,
   // 3. find a register class that contains PhysS.
-  unsigned PhysR;
   if (TargetRegisterInfo::isVirtualRegister(RR.Reg)) {
-    const TargetRegisterClass *VC = MRI.getRegClass(RR.Reg);
-    assert(VC->begin() != VC->end() && "Empty register class");
-    PhysR = *VC->begin();
-  } else {
-    assert(TargetRegisterInfo::isPhysicalRegister(RR.Reg));
-    PhysR = RR.Reg;
+    const auto &VC = composeWithSubRegIndex(*MRI.getRegClass(RR.Reg), RR.Sub);
+    return TRI.getRegSizeInBits(VC);
   }
-
-  unsigned PhysS = (RR.Sub == 0) ? PhysR : TRI.getSubReg(PhysR, RR.Sub);
-  const TargetRegisterClass *RC = TRI.getMinimalPhysRegClass(PhysS);
-  uint16_t BW = TRI.getRegSizeInBits(*RC);
-  return BW;
+  assert(TargetRegisterInfo::isPhysicalRegister(RR.Reg));
+  unsigned PhysR = (RR.Sub == 0) ? RR.Reg : TRI.getSubReg(RR.Reg, RR.Sub);
+  return getPhysRegBitWidth(PhysR);
 }
 
 BT::RegisterCell BT::MachineEvaluator::getCell(const RegisterRef &RR,
@@ -717,6 +710,12 @@ BT::BitMask BT::MachineEvaluator::mask(unsigned Reg, unsigned Sub) const {
   return BitMask(0, W-1);
 }
 
+uint16_t BT::MachineEvaluator::getPhysRegBitWidth(unsigned Reg) const {
+  assert(TargetRegisterInfo::isPhysicalRegister(Reg));
+  const TargetRegisterClass &PC = *TRI.getMinimalPhysRegClass(Reg);
+  return TRI.getRegSizeInBits(PC);
+}
+
 bool BT::MachineEvaluator::evaluate(const MachineInstr &MI,
                                     const CellMapType &Inputs,
                                     CellMapType &Outputs) const {
@@ -927,7 +926,8 @@ void BT::visitBranchesFrom(const MachineInstr &BI) {
     ++It;
   } while (FallsThrough && It != End);
 
-  typedef MachineBasicBlock::const_succ_iterator succ_iterator;
+  using succ_iterator = MachineBasicBlock::const_succ_iterator;
+
   if (!DefaultToAll) {
     // Need to add all CFG successors that lead to EH landing pads.
     // There won't be explicit branches to these blocks, but they must
@@ -958,7 +958,8 @@ void BT::visitUsesOf(unsigned Reg) {
   if (Trace)
     dbgs() << "visiting uses of " << PrintReg(Reg, &ME.TRI) << "\n";
 
-  typedef MachineRegisterInfo::use_nodbg_iterator use_iterator;
+  using use_iterator = MachineRegisterInfo::use_nodbg_iterator;
+
   use_iterator End = MRI.use_nodbg_end();
   for (use_iterator I = MRI.use_nodbg_begin(Reg); I != End; ++I) {
     MachineInstr *UseI = I->getParent();
@@ -1039,7 +1040,8 @@ void BT::run() {
   reset();
   assert(FlowQ.empty());
 
-  typedef GraphTraits<const MachineFunction*> MachineFlowGraphTraits;
+  using MachineFlowGraphTraits = GraphTraits<const MachineFunction*>;
+
   const MachineBasicBlock *Entry = MachineFlowGraphTraits::getEntryNode(&MF);
 
   unsigned MaxBN = 0;

@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "RISCVMCTargetDesc.h"
+#include "InstPrinter/RISCVInstPrinter.h"
 #include "RISCVMCAsmInfo.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -27,6 +28,9 @@
 
 #define GET_REGINFO_MC_DESC
 #include "RISCVGenRegisterInfo.inc"
+
+#define GET_SUBTARGETINFO_MC_DESC
+#include "RISCVGenSubtargetInfo.inc"
 
 using namespace llvm;
 
@@ -47,6 +51,14 @@ static MCAsmInfo *createRISCVMCAsmInfo(const MCRegisterInfo &MRI,
   return new RISCVMCAsmInfo(TT);
 }
 
+static MCInstPrinter *createRISCVMCInstPrinter(const Triple &T,
+                                               unsigned SyntaxVariant,
+                                               const MCAsmInfo &MAI,
+                                               const MCInstrInfo &MII,
+                                               const MCRegisterInfo &MRI) {
+  return new RISCVInstPrinter(MAI, MII, MRI);
+}
+
 extern "C" void LLVMInitializeRISCVTargetMC() {
   for (Target *T : {&getTheRISCV32Target(), &getTheRISCV64Target()}) {
     TargetRegistry::RegisterMCAsmInfo(*T, createRISCVMCAsmInfo);
@@ -54,5 +66,7 @@ extern "C" void LLVMInitializeRISCVTargetMC() {
     TargetRegistry::RegisterMCRegInfo(*T, createRISCVMCRegisterInfo);
     TargetRegistry::RegisterMCAsmBackend(*T, createRISCVAsmBackend);
     TargetRegistry::RegisterMCCodeEmitter(*T, createRISCVMCCodeEmitter);
+    TargetRegistry::RegisterMCInstPrinter(*T, createRISCVMCInstPrinter);
+    TargetRegistry::RegisterMCSubtargetInfo(*T, createRISCVMCSubtargetInfoImpl);
   }
 }

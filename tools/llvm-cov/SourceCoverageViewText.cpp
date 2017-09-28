@@ -30,7 +30,7 @@ void CoveragePrinterText::closeViewFile(OwnedStream OS) {
 
 Error CoveragePrinterText::createIndexFile(
     ArrayRef<std::string> SourceFiles,
-    const coverage::CoverageMapping &Coverage) {
+    const coverage::CoverageMapping &Coverage, const CoverageFilter &Filters) {
   auto OSOrErr = createOutputStream("index", "txt", /*InToplevel=*/true);
   if (Error E = OSOrErr.takeError())
     return E;
@@ -38,7 +38,7 @@ Error CoveragePrinterText::createIndexFile(
   raw_ostream &OSRef = *OS.get();
 
   CoverageReport Report(Opts, Coverage);
-  Report.renderFileReports(OSRef, SourceFiles);
+  Report.renderFileReports(OSRef, SourceFiles, Filters);
 
   Opts.colored_ostream(OSRef, raw_ostream::CYAN) << "\n"
                                                  << Opts.getLLVMVersionString();
@@ -120,7 +120,7 @@ void SourceCoverageViewText::renderLine(
     Col = End;
     if (Col == ExpansionCol)
       Highlight = raw_ostream::CYAN;
-    else if (S->HasCount && S->Count == 0)
+    else if (!S->IsGapRegion && S->HasCount && S->Count == 0)
       Highlight = raw_ostream::RED;
     else
       Highlight = None;
@@ -171,6 +171,10 @@ void SourceCoverageViewText::renderRegionMarkers(
   renderLinePrefix(OS, ViewDepth);
   OS.indent(getCombinedColumnWidth(getOptions()));
 
+  // Just consider the segments which start *and* end on this line.
+  if (Segments.size() > 1)
+    Segments = Segments.drop_back();
+
   unsigned PrevColumn = 1;
   for (const auto *S : Segments) {
     if (!S->IsRegionEntry)
@@ -182,13 +186,12 @@ void SourceCoverageViewText::renderRegionMarkers(
     std::string C = formatCount(S->Count);
     PrevColumn += C.size();
     OS << '^' << C;
+
+    if (getOptions().Debug)
+      errs() << "Marker at " << S->Line << ":" << S->Col << " = "
+            << formatCount(S->Count) << "\n";
   }
   OS << '\n';
-
-  if (getOptions().Debug)
-    for (const auto *S : Segments)
-      errs() << "Marker at " << S->Line << ":" << S->Col << " = "
-             << formatCount(S->Count) << (S->IsRegionEntry ? "\n" : " (pop)\n");
 }
 
 void SourceCoverageViewText::renderExpansionSite(
@@ -207,7 +210,7 @@ void SourceCoverageViewText::renderExpansionView(raw_ostream &OS,
     errs() << "Expansion at line " << ESV.getLine() << ", " << ESV.getStartCol()
            << " -> " << ESV.getEndCol() << '\n';
   ESV.View->print(OS, /*WholeFile=*/false, /*ShowSourceName=*/false,
-                  ViewDepth + 1);
+                  /*ShowTitle=*/false, ViewDepth + 1);
 }
 
 void SourceCoverageViewText::renderInstantiationView(raw_ostream &OS,
@@ -220,7 +223,7 @@ void SourceCoverageViewText::renderInstantiationView(raw_ostream &OS,
         << "Unexecuted instantiation: " << ISV.FunctionName << "\n";
   else
     ISV.View->print(OS, /*WholeFile=*/false, /*ShowSourceName=*/true,
-                    ViewDepth);
+                    /*ShowTitle=*/false, ViewDepth);
 }
 
 void SourceCoverageViewText::renderTitle(raw_ostream &OS, StringRef Title) {

@@ -59,6 +59,7 @@
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/IndirectCallSiteVisitor.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/OptimizationDiagnosticInfo.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Dominators.h"
@@ -166,15 +167,18 @@ static cl::opt<bool>
                    cl::desc("Use this option to turn on/off SELECT "
                             "instruction instrumentation. "));
 
-// Command line option to turn on CFG dot dump of raw profile counts
-static cl::opt<bool>
-    PGOViewRawCounts("pgo-view-raw-counts", cl::init(false), cl::Hidden,
-                     cl::desc("A boolean option to show CFG dag "
-                              "with raw profile counts from "
-                              "profile data. See also option "
-                              "-pgo-view-counts. To limit graph "
-                              "display to only one function, use "
-                              "filtering option -view-bfi-func-name."));
+// Command line option to turn on CFG dot or text dump of raw profile counts
+static cl::opt<PGOViewCountsType> PGOViewRawCounts(
+    "pgo-view-raw-counts", cl::Hidden,
+    cl::desc("A boolean option to show CFG dag or text "
+             "with raw profile counts from "
+             "profile data. See also option "
+             "-pgo-view-counts. To limit graph "
+             "display to only one function, use "
+             "filtering option -view-bfi-func-name."),
+    cl::values(clEnumValN(PGOVCT_None, "none", "do not show."),
+               clEnumValN(PGOVCT_Graph, "graph", "show a graph."),
+               clEnumValN(PGOVCT_Text, "text", "show in text.")));
 
 // Command line option to enable/disable memop intrinsic call.size profiling.
 static cl::opt<bool>
@@ -182,15 +186,56 @@ static cl::opt<bool>
                   cl::desc("Use this option to turn on/off "
                            "memory intrinsic size profiling."));
 
+// Emit branch probability as optimization remarks.
+static cl::opt<bool>
+    EmitBranchProbability("pgo-emit-branch-prob", cl::init(false), cl::Hidden,
+                          cl::desc("When this option is on, the annotated "
+                                   "branch probability will be emitted as "
+                                   " optimization remarks: -Rpass-analysis="
+                                   "pgo-instr-use"));
+
 // Command line option to turn on CFG dot dump after profile annotation.
 // Defined in Analysis/BlockFrequencyInfo.cpp:  -pgo-view-counts
-extern cl::opt<bool> PGOViewCounts;
+extern cl::opt<PGOViewCountsType> PGOViewCounts;
 
 // Command line option to specify the name of the function for CFG dump
 // Defined in Analysis/BlockFrequencyInfo.cpp:  -view-bfi-func-name=
 extern cl::opt<std::string> ViewBlockFreqFuncName;
 
 namespace {
+
+// Return a string describing the branch condition that can be
+// used in static branch probability heuristics:
+std::string getBranchCondString(Instruction *TI) {
+  BranchInst *BI = dyn_cast<BranchInst>(TI);
+  if (!BI || !BI->isConditional())
+    return std::string();
+
+  Value *Cond = BI->getCondition();
+  ICmpInst *CI = dyn_cast<ICmpInst>(Cond);
+  if (!CI)
+    return std::string();
+
+  std::string result;
+  raw_string_ostream OS(result);
+  OS << CmpInst::getPredicateName(CI->getPredicate()) << "_";
+  CI->getOperand(0)->getType()->print(OS, true);
+
+  Value *RHS = CI->getOperand(1);
+  ConstantInt *CV = dyn_cast<ConstantInt>(RHS);
+  if (CV) {
+    if (CV->isZero())
+      OS << "_Zero";
+    else if (CV->isOne())
+      OS << "_One";
+    else if (CV->isMinusOne())
+      OS << "_MinusOne";
+    else
+      OS << "_Const";
+  }
+  OS.flush();
+  return result;
+}
 
 /// The select instruction visitor plays three roles specified
 /// by the mode. In \c VM_counting mode, it simply counts the number of
@@ -504,6 +549,12 @@ void FuncPGOInstrumentation<Edge, BBInfo>::computeCFGHash() {
   FunctionHash = (uint64_t)SIVisitor.getNumOfSelectInsts() << 56 |
                  (uint64_t)ValueSites[IPVK_IndirectCallTarget].size() << 48 |
                  (uint64_t)MST.AllEdges.size() << 32 | JC.getCRC();
+  DEBUG(dbgs() << "Function Hash Computation for " << F.getName() << ":\n"
+               << " CRC = " << JC.getCRC()
+               << ", Selects = " << SIVisitor.getNumOfSelectInsts()
+               << ", Edges = " << MST.AllEdges.size()
+               << ", ICSites = " << ValueSites[IPVK_IndirectCallTarget].size()
+               << ", Hash = " << FunctionHash << "\n";);
 }
 
 // Check if we can safely rename this Comdat function.
@@ -783,6 +834,10 @@ public:
 
   Function &getFunc() const { return F; }
 
+  void dumpInfo(std::string Str = "") const {
+    FuncInfo.dumpInfo(Str);
+  }
+
 private:
   Function &F;
   Module *M;
@@ -1046,7 +1101,8 @@ void PGOUseFunc::setBranchWeights() {
     TerminatorInst *TI = BB.getTerminator();
     if (TI->getNumSuccessors() < 2)
       continue;
-    if (!isa<BranchInst>(TI) && !isa<SwitchInst>(TI))
+    if (!(isa<BranchInst>(TI) || isa<SwitchInst>(TI) ||
+          isa<IndirectBrInst>(TI)))
       continue;
     if (getBBInfo(&BB).CountValue == 0)
       continue;
@@ -1136,7 +1192,7 @@ void MemIntrinsicVisitor::instrumentOneMemIntrinsic(MemIntrinsic &MI) {
   Builder.CreateCall(
       Intrinsic::getDeclaration(M, Intrinsic::instrprof_value_profile),
       {llvm::ConstantExpr::getBitCast(FuncNameVar, I8PtrTy),
-       Builder.getInt64(FuncHash), Builder.CreatePtrToInt(Length, Int64Ty),
+       Builder.getInt64(FuncHash), Builder.CreateZExtOrTrunc(Length, Int64Ty),
        Builder.getInt32(IPVK_MemOPSize), Builder.getInt32(CurCtrId)});
   ++CurCtrId;
 }
@@ -1337,22 +1393,33 @@ static bool annotateAllFunctions(
       ColdFunctions.push_back(&F);
     else if (FreqAttr == PGOUseFunc::FFA_Hot)
       HotFunctions.push_back(&F);
-    if (PGOViewCounts && (ViewBlockFreqFuncName.empty() ||
-                          F.getName().equals(ViewBlockFreqFuncName))) {
+    if (PGOViewCounts != PGOVCT_None &&
+        (ViewBlockFreqFuncName.empty() ||
+         F.getName().equals(ViewBlockFreqFuncName))) {
       LoopInfo LI{DominatorTree(F)};
       std::unique_ptr<BranchProbabilityInfo> NewBPI =
           llvm::make_unique<BranchProbabilityInfo>(F, LI);
       std::unique_ptr<BlockFrequencyInfo> NewBFI =
           llvm::make_unique<BlockFrequencyInfo>(F, *NewBPI, LI);
-
-      NewBFI->view();
+      if (PGOViewCounts == PGOVCT_Graph)
+        NewBFI->view();
+      else if (PGOViewCounts == PGOVCT_Text) {
+        dbgs() << "pgo-view-counts: " << Func.getFunc().getName() << "\n";
+        NewBFI->print(dbgs());
+      }
     }
-    if (PGOViewRawCounts && (ViewBlockFreqFuncName.empty() ||
-                             F.getName().equals(ViewBlockFreqFuncName))) {
-      if (ViewBlockFreqFuncName.empty())
-        WriteGraph(&Func, Twine("PGORawCounts_") + Func.getFunc().getName());
-      else
-        ViewGraph(&Func, Twine("PGORawCounts_") + Func.getFunc().getName());
+    if (PGOViewRawCounts != PGOVCT_None &&
+        (ViewBlockFreqFuncName.empty() ||
+         F.getName().equals(ViewBlockFreqFuncName))) {
+      if (PGOViewRawCounts == PGOVCT_Graph)
+        if (ViewBlockFreqFuncName.empty())
+          WriteGraph(&Func, Twine("PGORawCounts_") + Func.getFunc().getName());
+        else
+          ViewGraph(&Func, Twine("PGORawCounts_") + Func.getFunc().getName());
+      else if (PGOViewRawCounts == PGOVCT_Text) {
+        dbgs() << "pgo-view-raw-counts: " << Func.getFunc().getName() << "\n";
+        Func.dumpInfo();
+      }
     }
   }
   M.setProfileSummary(PGOReader->getSummary().getMD(M.getContext()));
@@ -1424,6 +1491,28 @@ void setProfMetadata(Module *M, Instruction *TI, ArrayRef<uint64_t> EdgeCounts,
         for (const auto &W : Weights) { dbgs() << W << " "; }
         dbgs() << "\n";);
   TI->setMetadata(llvm::LLVMContext::MD_prof, MDB.createBranchWeights(Weights));
+  if (EmitBranchProbability) {
+    std::string BrCondStr = getBranchCondString(TI);
+    if (BrCondStr.empty())
+      return;
+
+    unsigned WSum =
+        std::accumulate(Weights.begin(), Weights.end(), 0,
+                        [](unsigned w1, unsigned w2) { return w1 + w2; });
+    uint64_t TotalCount =
+        std::accumulate(EdgeCounts.begin(), EdgeCounts.end(), 0,
+                        [](uint64_t c1, uint64_t c2) { return c1 + c2; });
+    BranchProbability BP(Weights[0], WSum);
+    std::string BranchProbStr;
+    raw_string_ostream OS(BranchProbStr);
+    OS << BP;
+    OS << " (total count : " << TotalCount << ")";
+    OS.flush();
+    Function *F = TI->getParent()->getParent();
+    OptimizationRemarkEmitter ORE(F);
+    ORE.emit(OptimizationRemark(DEBUG_TYPE, "pgo-instrumentation", TI)
+             << BrCondStr << " is true with probability : " << BranchProbStr);
+  }
 }
 
 template <> struct GraphTraits<PGOUseFunc *> {

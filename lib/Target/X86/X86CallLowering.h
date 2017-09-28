@@ -35,11 +35,15 @@ public:
   bool lowerFormalArguments(MachineIRBuilder &MIRBuilder, const Function &F,
                             ArrayRef<unsigned> VRegs) const override;
 
+  bool lowerCall(MachineIRBuilder &MIRBuilder, CallingConv::ID CallConv,
+                 const MachineOperand &Callee, const ArgInfo &OrigRet,
+                 ArrayRef<ArgInfo> OrigArgs) const override;
+
 private:
   /// A function of this type is used to perform value split action.
   typedef std::function<void(ArrayRef<unsigned>)> SplitArgTy;
 
-  void splitToValueTypes(const ArgInfo &OrigArgInfo,
+  bool splitToValueTypes(const ArgInfo &OrigArgInfo,
                          SmallVectorImpl<ArgInfo> &SplitArgs,
                          const DataLayout &DL, MachineRegisterInfo &MRI,
                          SplitArgTy SplitArg) const;
